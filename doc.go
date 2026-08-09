@@ -77,6 +77,12 @@ Reader.All yields raw records as []string, for when no decoding is wanted either
 An empty input is not an error: no columns, no rows, no error. The caller decides
 what that means.
 
+Memory is bounded by the largest single record rather than by the file, and that
+bound is WithMaxRecordBytes - 64 MiB by default. encoding/csv assembles a record in
+one buffer and caps nothing, so a field that opens a quote and never closes it is
+read to the end of the file and the whole file becomes one value. Exceeding the cap
+is ErrRecordTooLarge.
+
 A UTF-8 BOM is stripped, read with io.ReadFull so a slow reader cannot leave it in
 place.
 

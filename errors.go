@@ -27,6 +27,22 @@ callers who accept that risk.
 var ErrMissingColumns = fmt.Errorf("%w: header is missing columns", ErrParse)
 
 /*
+errRecordTooLarge is the raw signal budgetReader hands to encoding/csv. It travels
+through the parser and is turned into ErrRecordTooLarge, with a line, by the
+reader.
+*/
+var errRecordTooLarge = errors.New("record exceeds the byte limit")
+
+/*
+ErrRecordTooLarge reports a single record longer than WithMaxRecordBytes allows.
+
+Almost always an unclosed quote: encoding/csv then reads to the end of the file
+looking for the closing one, and the whole file becomes a single field. The limit
+is what keeps memory bounded on input the caller did not write.
+*/
+var ErrRecordTooLarge = fmt.Errorf("%w: %w", ErrParse, errRecordTooLarge)
+
+/*
 ErrSchema reports wiring that cannot work whatever the file holds: a struct that
 cannot be decoded into at all - not a struct, a tagged field that is not a string
 or not exported, two fields asking for one column, a tag inside an embedded struct

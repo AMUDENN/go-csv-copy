@@ -7,6 +7,24 @@ below `v1.0.0` the API may still move.
 
 ## [0.1.0] — Unreleased
 
+### Added
+
+- **`WithMaxRecordBytes`, capping one record at 64 MiB by default**, reported as the new
+  `ErrRecordTooLarge` (which wraps `ErrParse`).
+
+  `encoding/csv` assembles a record in a single buffer and has no limit of its own, so a field
+  that opens a quote and never closes it is read to the end of the file and the whole file becomes
+  one value — measured, not assumed: a 1 MiB payload came back as one 1 048 577-byte field. That is
+  the one input that broke the documented guarantee that memory does not depend on the size of the
+  file, and it is reachable by accident, so it was also a denial of service from a single file.
+  Lazy quoting is not the cause: the parser reads to the end either way and only then decides
+  whether to report the quote.
+
+  The budget is per record, not per file, so a legitimate multi-line quoted field gets the whole
+  budget of its own. The bound is approximate by up to one `bufio` buffer, because `csv.Reader`
+  reads ahead. Pass `WithMaxRecordBytes(0)` to remove the cap. Cost: one allocation per file and
+  none per row.
+
 ### Breaking
 
 - **`WithLazyQuotes` now defaults to `false`.** Quoting that `encoding/csv` would reject is

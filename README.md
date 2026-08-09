@@ -216,6 +216,7 @@ type RowSource[T any] interface {
 | `WithVariableColumns(bool)` | `false` | accept rows of a different width: missing trailing values → `nil`, extra ones dropped |
 | `WithAllowMissingColumns(bool)` | `false` | do not fail when a tagged column is absent from the header |
 | `WithPointerValues(bool)` | `false` | `Raw` yields `*string` instead of `string`, removing one allocation per cell |
+| `WithMaxRecordBytes(int64)` | `64 MiB` | cap on one record; zero removes it. Exceeding it is `ErrRecordTooLarge` |
 
 ### The `csv` tag
 
@@ -306,9 +307,13 @@ run — including a run on an empty file.
   Breaking out of a loop is different: that is not an error, and the next pull carries on.
 - **`Record()` names the row that failed**, as far as `encoding/csv` got with it. `Line()` names the
   physical line it starts on.
-- **Memory is constant** and independent of the row count. `Values()` reuses one slice, which is
-  safe under `pgx.CopyFrom` because it encodes a row before asking for the next. If you drive a
-  source by hand, do not retain the result of `Values()` between iterations.
+- **Memory is constant** and independent of the row count — bounded by the largest single record,
+  and that bound is `WithMaxRecordBytes` (64 MiB by default). `encoding/csv` assembles a record in
+  one buffer and has no limit of its own, so a field that opens a quote and never closes it is read
+  to the end of the file and the whole file becomes one value; the cap is what makes the guarantee
+  hold on input nobody checked. `Values()` reuses one slice, which is safe under `pgx.CopyFrom`
+  because it encodes a row before asking for the next. If you drive a source by hand, do not retain
+  the result of `Values()` between iterations.
 - **Not safe for concurrent use.** One source, one goroutine — the same as `pgx.CopyFrom`.
 - `Reader`, `Raw` and `Typed` do not close the `io.Reader` you give them.
 

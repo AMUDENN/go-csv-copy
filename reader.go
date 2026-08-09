@@ -25,6 +25,7 @@ the file is. It does not close the underlying io.Reader.
 */
 type Reader struct {
 	cr       *csv.Reader
+	budget   *budgetReader
 	settings settings
 	columns  []string
 	record   []string
@@ -54,6 +55,12 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 		return nil, fmt.Errorf("%w: read bom: %w", ErrParse, err)
 	}
 
+	var budget *budgetReader
+	if set.maxRecordBytes > 0 {
+		budget = &budgetReader{r: body, max: set.maxRecordBytes}
+		body = budget
+	}
+
 	cr := csv.NewReader(body)
 	cr.Comma = set.comma
 	cr.LazyQuotes = set.lazyQuotes
@@ -66,7 +73,7 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 	reader := &Reader{settings: set}
 
 	for row := 1; row < set.headerRow; row++ {
-		if _, err = cr.Read(); err != nil {
+		if _, err = readRecord(cr, budget); err != nil {
 			if errors.Is(err, io.EOF) {
 				return reader, nil
 			}
@@ -74,7 +81,7 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 		}
 	}
 
-	header, err := cr.Read()
+	header, err := readRecord(cr, budget)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			return reader, nil
@@ -87,6 +94,7 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 		reader.columns[i] = set.normalizeHeader(name)
 	}
 	reader.cr = cr
+	reader.budget = budget
 	reader.line = recordLine(cr, header, set.headerRow)
 
 	if !set.variableColumns {
@@ -150,7 +158,7 @@ func (r *Reader) Read() ([]string, error) {
 		return nil, io.EOF
 	}
 
-	record, err := r.cr.Read()
+	record, err := readRecord(r.cr, r.budget)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil, io.EOF
@@ -267,6 +275,20 @@ func errorLine(fallback int, err error) int {
 }
 
 /*
+readRecord pulls one record, giving it a fresh byte budget first.
+
+Per record, not per file: a legitimate multi-line quoted field gets the whole
+budget of its own, and only a record that never ends runs out.
+*/
+func readRecord(cr *csv.Reader, budget *budgetReader) ([]string, error) {
+	if budget != nil {
+		budget.reset()
+	}
+
+	return cr.Read()
+}
+
+/*
 parseError attributes err to a line.
 
 A csv.ParseError already names the line in its own message, so repeating it here
@@ -274,6 +296,12 @@ would print it twice - "line 12: record on line 12: ..." - for the error type
 that produces most of these.
 */
 func parseError(line int, err error) error {
+	// Checked before the ParseError branch: encoding/csv may hand the budget's
+	// error back wrapped in one, and the useful name for it is its own.
+	if errors.Is(err, errRecordTooLarge) {
+		return fmt.Errorf("%w: line %d", ErrRecordTooLarge, line)
+	}
+
 	var parseErr *csv.ParseError
 	if errors.As(err, &parseErr) {
 		return fmt.Errorf("%w: %w", ErrParse, err)

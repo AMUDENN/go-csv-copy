@@ -15,13 +15,13 @@ visible.
 Measured on go1.26.1 windows/amd64, one run at -benchtime=3x, 100k rows of 5
 columns:
 
-	BenchmarkRaw-6                18.7 ms   11.2 MB   600033 allocs   (6 per row)
-	BenchmarkRawAll-6             20.6 ms   11.2 MB   600032 allocs   (6 per row)
-	BenchmarkRawPointerValues-6   11.2 ms    3.2 MB   100033 allocs   (1 per row)
-	BenchmarkTyped-6              13.6 ms    3.2 MB   100038 allocs   (1 per row)
-	BenchmarkTypedAll-6           14.4 ms    3.2 MB   100038 allocs   (1 per row)
-	BenchmarkTypedCopy-6          22.2 ms   11.2 MB   600042 allocs   (6 per row)
-	BenchmarkNewTyped-6            4.0 us    6.0 kB       38 allocs   (per file)
+	BenchmarkRaw-6                20.1 ms   11.2 MB   600036 allocs   (6 per row)
+	BenchmarkRawAll-6             19.6 ms   11.2 MB   600034 allocs   (6 per row)
+	BenchmarkRawPointerValues-6   11.9 ms    3.2 MB   100034 allocs   (1 per row)
+	BenchmarkTyped-6              15.7 ms    3.2 MB   100039 allocs   (1 per row)
+	BenchmarkTypedAll-6           14.9 ms    3.2 MB   100039 allocs   (1 per row)
+	BenchmarkTypedCopy-6          23.5 ms   11.2 MB   600042 allocs   (6 per row)
+	BenchmarkNewTyped-6            6.3 us    6.1 kB       39 allocs   (per file)
 
 Three runs is far too few to say anything about ns/op - treat those as an order
 of magnitude and compare allocs/op, which is stable to the allocation. The point
@@ -43,6 +43,11 @@ free. BenchmarkRawPointerValues is what that costs instead.
 
 The All variants sit on the same numbers as the Next-driven ones, to the
 allocation. Ranging is a way of writing the loop, not a second cost.
+
+WithMaxRecordBytes costs one allocation per file - the budgetReader itself, made
+once in NewReader - and none per row. It sits under the bufio.Reader that
+csv.Reader already owns, so a row does not reach it at all; only the buffer refills
+do, and those cost an integer subtraction.
 
 Watch for: allocs/op climbing above (columns + 1) per row, an All benchmark
 drifting away from its Next counterpart, or any growth in BenchmarkNewTyped,

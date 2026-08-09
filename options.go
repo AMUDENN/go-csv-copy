@@ -16,7 +16,17 @@ type settings struct {
 	variableColumns  bool
 	allowMissing     bool
 	pointerValues    bool
+	maxRecordBytes   int64
 }
+
+/*
+defaultMaxRecordBytes bounds one record at 64 MiB.
+
+No honest row comes near it - a thousand columns of 64 KiB each would still fit -
+and an unclosed quote runs into it immediately. Sized to be invisible in normal
+use and to catch the one input that is not normal.
+*/
+const defaultMaxRecordBytes = 64 << 20
 
 func newSettings(opts []Option) settings {
 	set := settings{
@@ -27,6 +37,7 @@ func newSettings(opts []Option) settings {
 		headerRow:        1,
 		normalizeHeader:  NormalizeSpace,
 		tag:              "csv",
+		maxRecordBytes:   defaultMaxRecordBytes,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -168,4 +179,26 @@ Affects Raw only. In Copy the boxing happens inside your own encode func.
 */
 func WithPointerValues(pointers bool) Option {
 	return func(s *settings) { s.pointerValues = pointers }
+}
+
+/*
+WithMaxRecordBytes caps how large one record may be. Zero, or anything negative,
+removes the cap. Defaults to 64 MiB.
+
+The cap is what makes "memory does not depend on the size of the file" true for
+input nobody checked. encoding/csv assembles a record in one buffer and has no
+limit of its own, so a field that opens a quote and never closes it is read to the
+end of the file and the whole file becomes one value. Exceeding the cap is
+ErrRecordTooLarge.
+
+The bound is approximate: csv.Reader buffers ahead, so the accounting is off by up
+to one buffer. It is an upper bound on memory, not a byte count to assert against.
+*/
+func WithMaxRecordBytes(n int64) Option {
+	return func(s *settings) {
+		if n < 0 {
+			n = 0
+		}
+		s.maxRecordBytes = n
+	}
 }
