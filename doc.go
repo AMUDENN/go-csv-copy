@@ -96,9 +96,12 @@ Record and Line name the row that failed, so an error message can carry it. Line
 is the physical line of the file, taken from encoding/csv, so it stays right
 across blank lines and quoted fields spanning several lines.
 
-Errors a file can cause wrap ErrParse, so an application can alias its own
-sentinel to it. Errors the calling code causes wrap ErrSchema instead, because no
-file will fix them.
+Errors are split by who can fix them, because the three answers differ. Errors the
+file's content causes wrap ErrParse, so an application can alias its own sentinel
+to it and quarantine the file. Errors the stream causes - a dropped connection, a
+cancelled context - wrap ErrIO instead and deserve a retry, not a quarantine: the
+file is fine. Errors the calling code causes wrap ErrSchema, because no file will
+ever fix them.
 
 Values reuses one slice between rows. That is safe under pgx.CopyFrom, which
 encodes a row before asking for the next; a caller driving a source by hand must

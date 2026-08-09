@@ -282,9 +282,23 @@ Errors are split by who can fix them.
 
 | Sentinel | Wraps `ErrParse` | Cause |
 |---|---|---|
-| `ErrParse` | — | a malformed record, a failing `convert`, a read failure |
+| `ErrParse` | — | the file's content is wrong: a malformed record, a failing `convert` |
 | `ErrMissingColumns` | yes | the header lacks a column a tag asks for |
+| `ErrInvalidColumns` | yes | `ValidateColumns` refused a header name |
+| `ErrRecordTooLarge` | yes | one record outgrew `WithMaxRecordBytes` |
+| `ErrIO` | **no** | the stream failed, not the file: a dropped connection, a cancelled context, a bad disk |
 | `ErrSchema` | **no** | a bug in the calling code: not a struct, a tag on a non-string or unexported field, a tag inside an embedded struct, two fields asking for one column, a nil reader/convert/src/encode, an unusable delimiter |
+
+The split exists because the three answers differ: `ErrSchema` means **fix the code**, `ErrIO`
+means **retry**, `ErrParse` means **the file is bad** — quarantine it. Getting this wrong is not
+theoretical. Until `ErrIO` existed, a dropped TCP connection was reported as `ErrParse`, so anyone
+following the advice above would quarantine a perfectly good file forever because the network
+blinked once.
+
+The classification is not guesswork: `encoding/csv` reports everything the parser objects to as a
+`*csv.ParseError` and passes anything else back from the underlying reader unchanged, so the shape
+of the error is the evidence. The original cause stays in the chain either way, so
+`errors.Is(err, context.Canceled)` still answers.
 
 Everything a file can cause wraps `ErrParse` and carries the line number:
 

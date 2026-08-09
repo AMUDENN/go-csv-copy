@@ -52,7 +52,9 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 
 	body, err := skipBOM(r)
 	if err != nil {
-		return nil, fmt.Errorf("%w: read bom: %w", ErrParse, err)
+		// The stream failed before a byte of content existed to be malformed, so
+		// this is ErrIO and not a bad file.
+		return nil, fmt.Errorf("%w: read bom: %w", ErrIO, err)
 	}
 
 	var budget *budgetReader
@@ -77,7 +79,7 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 			if errors.Is(err, io.EOF) {
 				return reader, nil
 			}
-			return nil, parseError(row, err)
+			return nil, classify(row, err)
 		}
 	}
 
@@ -86,7 +88,7 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 		if errors.Is(err, io.EOF) {
 			return reader, nil
 		}
-		return nil, parseError(set.headerRow, err)
+		return nil, classify(set.headerRow, err)
 	}
 
 	reader.columns = make([]string, len(header))
@@ -152,8 +154,10 @@ The first bad record ends the reader: the error is returned again by every later
 call and stays in Err. Rows are never skipped, so a caller cannot resume past a
 bad record and mistake a truncated file for a whole one.
 
-The returned slice is reused by the next call. Every error other than io.EOF wraps
-ErrParse and carries the line number.
+The returned slice is reused by the next call. Every error other than io.EOF
+carries the line number and wraps one of three sentinels: ErrRecordTooLarge if the
+record outgrew WithMaxRecordBytes, ErrParse if the content is malformed, or ErrIO
+if the stream underneath failed.
 */
 func (r *Reader) Read() ([]string, error) {
 	if r.err != nil {
@@ -174,7 +178,7 @@ func (r *Reader) Read() ([]string, error) {
 		// this record did have, padded out with the last one's leftovers.
 		r.line = errorLine(r.line+1, err)
 		r.record = record
-		r.err = parseError(r.line, err)
+		r.err = classify(r.line, err)
 
 		return nil, r.err
 	}
@@ -294,15 +298,23 @@ func readRecord(cr *csv.Reader, budget *budgetReader) ([]string, error) {
 }
 
 /*
-parseError attributes err to a line.
+classify decides whose fault an error from encoding/csv is, and attributes it to a
+line.
+
+The rule rests on how encoding/csv reports: everything the parser itself objects to
+arrives as a *csv.ParseError, and anything else it hands back came from the
+underlying io.Reader unchanged. So the shape of the error is the evidence, and the
+three outcomes are the three sentinels.
+
+The order matters. The byte budget is enforced by a reader, which makes it look like
+an I/O failure, but a record too large to read is a property of the file - it goes
+to ErrRecordTooLarge, not ErrIO.
 
 A csv.ParseError already names the line in its own message, so repeating it here
-would print it twice - "line 12: record on line 12: ..." - for the error type
-that produces most of these.
+would print it twice - "line 12: record on line 12: ..." - for the error type that
+produces most of these.
 */
-func parseError(line int, err error) error {
-	// Checked before the ParseError branch: encoding/csv may hand the budget's
-	// error back wrapped in one, and the useful name for it is its own.
+func classify(line int, err error) error {
 	if errors.Is(err, errRecordTooLarge) {
 		return fmt.Errorf("%w: line %d", ErrRecordTooLarge, line)
 	}
@@ -312,7 +324,7 @@ func parseError(line int, err error) error {
 		return fmt.Errorf("%w: %w", ErrParse, err)
 	}
 
-	return fmt.Errorf("%w: line %d: %w", ErrParse, line, err)
+	return fmt.Errorf("%w: line %d: %w", ErrIO, line, err)
 }
 
 /*

@@ -43,6 +43,22 @@ below `v1.0.0` the API may still move.
 
 ### Breaking
 
+- **A failing input stream is now `ErrIO`, not `ErrParse`.**
+
+  `ErrIO` deliberately does not wrap `ErrParse`. Until now every non-EOF error from the underlying
+  `io.Reader` — a dropped connection, a cancelled context, a failing disk — was reported as
+  `ErrParse`. The README tells callers to quarantine files on `ErrParse`, so a transient network
+  blip sent a perfectly good file to quarantine forever. The file was never the problem.
+
+  The rule is `encoding/csv`'s own reporting, verified rather than assumed: whatever the parser
+  objects to arrives as a `*csv.ParseError`, and anything else it hands back came from the reader
+  unchanged. The original cause stays in the chain, so `errors.Is(err, context.Canceled)` answers.
+
+  *Migration.* Read failures now need their own branch. `errors.Is(err, ErrIO)` → retry;
+  `errors.Is(err, ErrParse)` → the file is bad; `errors.Is(err, ErrSchema)` → fix the code. Code
+  that only checked `ErrParse` will stop catching read failures — which is the point, but it does
+  mean the retry path has to exist.
+
 - **`WithLazyQuotes` now defaults to `false`.** Quoting that `encoding/csv` would reject is
   rejected again by default.
 

@@ -251,6 +251,8 @@ func TestNewReaderMalformedHeader(t *testing.T) {
 	}
 }
 
+// A stream that fails before the header exists is ErrIO: there was no content to
+// be malformed.
 func TestNewReaderPropagatesReadError(t *testing.T) {
 	want := errors.New("network is down")
 
@@ -258,8 +260,11 @@ func TestNewReaderPropagatesReadError(t *testing.T) {
 	if !errors.Is(err, want) {
 		t.Fatalf("error = %v, want it to wrap %v", err, want)
 	}
-	if !errors.Is(err, ErrParse) {
-		t.Errorf("error %v does not wrap ErrParse", err)
+	if errors.Is(err, ErrParse) {
+		t.Error("a read failure on the header must not wrap ErrParse")
+	}
+	if !errors.Is(err, ErrIO) {
+		t.Errorf("error %v does not wrap ErrIO", err)
 	}
 }
 

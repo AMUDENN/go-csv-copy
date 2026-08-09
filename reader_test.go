@@ -1,6 +1,7 @@
 package csvcopy
 
 import (
+	"context"
 	"encoding/csv"
 	"errors"
 	"io"
@@ -447,15 +448,18 @@ func TestReaderParseErrorNamesTheLineOnce(t *testing.T) {
 }
 
 /*
-A stream that breaks mid-file is an ErrParse like any other, and still carries a
-line.
+A stream that breaks mid-file is ErrIO, not ErrParse, and still carries a line.
+
+The distinction is the point: a caller that quarantines files on ErrParse would
+otherwise quarantine a perfectly good file because the network blinked. The file is
+fine, the read is not, and the right answer is to try again.
 
 encoding/csv passes an I/O error through as itself rather than wrapping it in a
-csv.ParseError, so there is no line to take from it and the count kept here is
-what names the record. That is the one case where the two ways of numbering
-cannot agree, and a count is the best available answer.
+csv.ParseError, so there is no line to take from it and the count kept here is what
+names the record. That is the one case where the two ways of numbering cannot
+agree, and a count is the best available answer.
 */
-func TestReaderPropagatesMidStreamReadError(t *testing.T) {
+func TestReaderMidStreamReadErrorIsErrIO(t *testing.T) {
 	want := errors.New("network is down")
 
 	reader, err := NewReader(&brokenReader{data: []byte("a;b\n1;2\n"), err: want})
@@ -470,14 +474,69 @@ func TestReaderPropagatesMidStreamReadError(t *testing.T) {
 	if !errors.Is(err, want) {
 		t.Fatalf("Read = %v, want it to wrap %v", err, want)
 	}
-	if !errors.Is(err, ErrParse) {
-		t.Errorf("error %v does not wrap ErrParse", err)
+	if !errors.Is(err, ErrIO) {
+		t.Errorf("error %v does not wrap ErrIO", err)
+	}
+	if errors.Is(err, ErrParse) {
+		t.Error("a read failure must not wrap ErrParse: the file is not the problem")
 	}
 	if !strings.Contains(err.Error(), "line 3") {
 		t.Errorf("error %q does not name line 3", err)
 	}
 	if got, want := reader.Line(), 3; got != want {
 		t.Errorf("Line() = %d, want %d", got, want)
+	}
+}
+
+// A cancelled context has to stay recognisable through the wrapping, or a caller
+// cannot tell "we gave up" from "the disk died".
+func TestReaderCancelledContextIsErrIO(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	reader, err := NewReader(&brokenReader{data: []byte("a;b\n1;2\n"), err: ctx.Err()})
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if _, err = reader.Read(); err != nil {
+		t.Fatalf("Read row 1: %v", err)
+	}
+
+	_, err = reader.Read()
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error %v does not unwrap to context.Canceled", err)
+	}
+	if !errors.Is(err, ErrIO) {
+		t.Errorf("error %v does not wrap ErrIO", err)
+	}
+	if errors.Is(err, ErrParse) {
+		t.Error("a cancelled read must not look like a bad file")
+	}
+}
+
+// Malformed content stays ErrParse. This is the other half of the classification,
+// and the regression that keeps ErrIO from swallowing everything.
+func TestReaderMalformedContentStaysErrParse(t *testing.T) {
+	tests := map[string]string{
+		"short record":   "a;b;c\n1;2\n",
+		"unclosed quote": "a;b\n\"open;x\n",
+	}
+
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			reader, err := NewReader(strings.NewReader(input))
+			if err != nil {
+				t.Fatalf("NewReader: %v", err)
+			}
+
+			_, err = reader.Read()
+			if !errors.Is(err, ErrParse) {
+				t.Fatalf("Read = %v, want an error wrapping ErrParse", err)
+			}
+			if errors.Is(err, ErrIO) {
+				t.Error("malformed content must not be reported as a read failure")
+			}
+		})
 	}
 }
 
