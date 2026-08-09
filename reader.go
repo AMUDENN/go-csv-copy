@@ -108,6 +108,11 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 Columns returns the header as it was read and normalized, or nil if the input was
 empty. The slice is shared, not copied - it is handed straight to pgx.CopyFrom,
 which does not modify it.
+
+These names come out of the file and are untrusted input. Normalizing collapses
+whitespace; it does not make a name safe to paste into a statement. Before one
+reaches DDL, quote it - pgx.Identifier{name}.Sanitize() - or put the header through
+ValidateColumns. For CopyFrom, pgx quotes them itself.
 */
 func (r *Reader) Columns() []string {
 	return r.columns

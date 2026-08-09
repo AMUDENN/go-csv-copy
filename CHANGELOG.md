@@ -9,6 +9,22 @@ below `v1.0.0` the API may still move.
 
 ### Added
 
+- **`ValidateColumns` and `ErrInvalidColumns`**, for the header names a staging table is built
+  from.
+
+  `Columns()` returns names that came out of the file, and the documented staging-table pattern
+  fed them straight into `CREATE TABLE`. A column called `x" ); DROP TABLE clients; --` is just a
+  text file someone wrote, so the pattern as documented was an injection in anyone's code who
+  copied it. The README example now validates before building DDL, and the godoc on both
+  `Columns()` methods says plainly that the names are untrusted.
+
+  `ValidateColumns` rejects empty names, duplicates, names over 63 bytes — Postgres truncates at
+  `NAMEDATALEN` and two names differing only past byte 63 become one column — and anything outside
+  `[A-Za-z0-9_]`, reporting every violation in one message. It is deliberately stricter than
+  injection safety: prose names and non-ASCII names are refused too, because a header like that
+  should be mapped explicitly rather than quoted and hoped for. Passing it does not replace
+  quoting.
+
 - **`WithMaxRecordBytes`, capping one record at 64 MiB by default**, reported as the new
   `ErrRecordTooLarge` (which wraps `ErrParse`).
 

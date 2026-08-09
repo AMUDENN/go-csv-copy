@@ -74,6 +74,13 @@ if len(columns) == 0 {
     return nil // an empty file is not an error
 }
 
+// The names came out of the file. This one builds DDL from them, so they are
+// untrusted input: a column called `x" ); DROP TABLE clients; --` is just a text
+// file someone wrote. Quote them, or refuse the header outright.
+if err := csvcopy.ValidateColumns(columns); err != nil {
+    return err
+}
+
 if err := createStagingTable(ctx, tx, table, columns); err != nil {
     return err
 }
@@ -256,6 +263,14 @@ the struct itself.
 `Unused()` is worth logging as a warning: when an export renames a column, the tag simply matches
 nothing, no error is raised, and the wrong data reaches the database. The unbound column is the only
 visible trace.
+
+⚠️ **`Columns()` returns untrusted input.** The names come out of the file, and the staging-table
+pattern puts them on the path to `CREATE TABLE` — a column called `x" ); DROP TABLE clients; --` is
+just a text file someone wrote. Quote every name that reaches a statement with
+`pgx.Identifier{name}.Sanitize()`, or refuse the header up front with
+`csvcopy.ValidateColumns(columns)`, which rejects empty names, duplicates, names over 63 bytes
+(Postgres truncates at `NAMEDATALEN` and two columns then collide) and anything outside
+`[A-Za-z0-9_]`, listing every violation at once. `CopyFrom` itself quotes them.
 
 ⚠️ `WithAllowMissingColumns(true)` is dangerous. The absent field reads as the empty string on every
 row and reaches the database as `NULL`, quietly wiping whatever that column held. Only use it where
