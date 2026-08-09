@@ -1,5 +1,7 @@
 package csvcopy
 
+import "fmt"
+
 /*
 RowSource is anything that yields values one at a time: Typed, or a source of your
 own over XLSX, an API or a generator.
@@ -37,15 +39,19 @@ being wrong costs an allocation rather than correctness. encode must append in t
 same order as the column list passed to pgx.CopyFrom - the two are a pair, and
 Postgres cannot notice when they disagree if the types are compatible.
 
-Panics if src or encode is nil: both are wiring, and a nil one cannot be recovered
-from at the point it would be noticed.
+A nil src or encode is ErrSchema, the same as a nil reader or convert elsewhere in
+the package: it is wiring the calling code got wrong, and no input file will fix
+it.
 */
-func NewCopy[T any](src RowSource[T], columns int, encode func(dst []any, item T) []any) *Copy[T] {
+func NewCopy[T any](src RowSource[T], columns int, encode func(dst []any, item T) []any) (*Copy[T], error) {
+	// A typed nil - (*yourSource)(nil) - is not caught here: an interface holding
+	// a type descriptor is not nil. It fails on the first Next instead, which is
+	// where a nil receiver would fail anyway.
 	if src == nil {
-		panic("csvcopy: NewCopy: src is nil")
+		return nil, fmt.Errorf("%w: src is nil", ErrSchema)
 	}
 	if encode == nil {
-		panic("csvcopy: NewCopy: encode is nil")
+		return nil, fmt.Errorf("%w: encode is nil", ErrSchema)
 	}
 	if columns < 0 {
 		columns = 0
@@ -55,7 +61,7 @@ func NewCopy[T any](src RowSource[T], columns int, encode func(dst []any, item T
 		src:    src,
 		encode: encode,
 		row:    make([]any, 0, columns),
-	}
+	}, nil
 }
 
 // Next advances the underlying source.

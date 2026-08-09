@@ -42,9 +42,12 @@ program actually works with - only the caller can tell an empty cell from a zero
 		return err
 	}
 
-	source := csvcopy.NewCopy(rows, len(columns), func(dst []any, e *entity) []any {
+	source, err := csvcopy.NewCopy(rows, len(columns), func(dst []any, e *entity) []any {
 		return append(dst, e.ID, e.Name)
 	})
+	if err != nil {
+		return err
+	}
 	n, err := tx.CopyFrom(ctx, pgx.Identifier{table}, columns, source)
 
 NewCopy adapts any RowSource - Typed, or one of your own over XLSX or an API - to
@@ -83,7 +86,9 @@ and stays there - a source that has failed yields nothing more, so ranging All
 again cannot resume past the row that broke. Breaking out of a loop is not an
 error, and the next pull carries on from where it stopped.
 
-Record and Line name the row that failed, so an error message can carry it.
+Record and Line name the row that failed, so an error message can carry it. Line
+is the physical line of the file, taken from encoding/csv, so it stays right
+across blank lines and quoted fields spanning several lines.
 
 Errors a file can cause wrap ErrParse, so an application can alias its own
 sentinel to it. Errors the calling code causes wrap ErrSchema instead, because no

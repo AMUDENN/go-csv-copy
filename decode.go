@@ -47,6 +47,12 @@ func taggedFields[S any](set settings) ([]tagged, error) {
 
 		tag := field.Tag.Get(set.tag)
 		if tag == "" || tag == "-" {
+			if field.Anonymous && hasTag(field.Type, set.tag, map[reflect.Type]bool{structType: true}) {
+				return nil, fmt.Errorf(
+					"%w: %s embeds %s, which has %s tags, and embedded fields are not matched - list the columns on %s itself",
+					ErrSchema, structType.Name(), field.Type, set.tag, structType.Name())
+			}
+
 			continue
 		}
 
@@ -62,10 +68,60 @@ func taggedFields[S any](set settings) ([]tagged, error) {
 				ErrSchema, structType.Name(), field.Name, set.tag, tag, field.Type)
 		}
 
-		fields = append(fields, tagged{field: i, name: set.normalizeHeader(tag)})
+		name := set.normalizeHeader(tag)
+
+		// Two fields asking for one column is a copy-paste slip far more often than
+		// an intent to duplicate a value, and the reader cannot tell the two apart.
+		// A linear scan beats a map: a struct has a handful of tagged fields, and
+		// this way the check costs no allocation.
+		for _, existing := range fields {
+			if existing.name == name {
+				return nil, fmt.Errorf("%w: %s.%s and %s.%s both ask for column %q",
+					ErrSchema, structType.Name(), structType.Field(existing.field).Name,
+					structType.Name(), field.Name, name)
+			}
+		}
+
+		fields = append(fields, tagged{field: i, name: name})
 	}
 
 	return fields, nil
+}
+
+/*
+hasTag reports whether t, or anything t embeds, carries the tag.
+
+Only used to refuse such a struct. Walking into an embedded struct and decoding
+into it would be a feature; doing neither is the bug this guards against - the
+tag binds to nothing, the field reads as empty on every row, and the column it
+was meant to fill is wiped with NULL. That is what ErrMissingColumns exists to
+prevent, and it cannot see this case because the tag never reaches the header
+matcher at all.
+
+visited stops a struct that embeds itself through a pointer from recursing
+forever.
+*/
+func hasTag(t reflect.Type, tag string, visited map[reflect.Type]bool) bool {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct || visited[t] {
+		return false
+	}
+	visited[t] = true
+
+	for i := range t.NumField() {
+		field := t.Field(i)
+
+		if value := field.Tag.Get(tag); value != "" && value != "-" {
+			return true
+		}
+		if field.Anonymous && hasTag(field.Type, tag, visited) {
+			return true
+		}
+	}
+
+	return false
 }
 
 /*

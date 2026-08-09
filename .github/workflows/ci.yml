@@ -9,7 +9,9 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  # The gate. Everything that has to hold before a merge runs here, on one
+  # platform and one toolchain, so a failure points at one place.
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -57,3 +59,35 @@ jobs:
             echo "go.mod gained a require block; csvcopy must stay dependency-free"
             exit 1
           fi
+
+      # No dependencies to audit, so this is only ever about the standard library
+      # the package is built against - which is exactly the part a consumer cannot
+      # see in go.mod.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  # The package is written on Windows and merged from Linux, and the `go`
+  # directive promises 1.24. Both claims need a machine behind them, and neither
+  # needs the full gate above repeated on it.
+  compatibility:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        # The oldest version go.mod allows and the newest that exists. What
+        # breaks in between breaks at one end too.
+        go: ['1.24', '1.26.1']
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+
+      # No -race here: it needs cgo, and a C toolchain is not a given on every
+      # runner. The gate job covers races.
+      - name: test
+        run: go test ./...

@@ -28,9 +28,10 @@ var ErrMissingColumns = fmt.Errorf("%w: header is missing columns", ErrParse)
 
 /*
 ErrSchema reports wiring that cannot work whatever the file holds: a struct that
-cannot be decoded into at all - not a struct, a tagged field that is not a string,
-a tagged field that is not exported - a nil reader or convert, or a delimiter
-encoding/csv will not accept.
+cannot be decoded into at all - not a struct, a tagged field that is not a string
+or not exported, two fields asking for one column, a tag inside an embedded struct
+where it would bind to nothing - a nil reader, convert, src or encode, or a
+delimiter encoding/csv will not accept.
 
 It deliberately does not wrap ErrParse. No input file will ever fix it, so a
 caller that retries or quarantines files on ErrParse should not treat it as a bad

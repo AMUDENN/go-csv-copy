@@ -165,6 +165,9 @@ Unused returns the header columns no tag bound to.
 Worth logging as a warning: when an export renames a column, the tag stops
 matching it, no error is raised, and the column that was renamed away is the only
 trace left.
+
+The slice is shared, not copied. It is built once per file and never written
+again, so reading it is safe; do not modify it.
 */
 func (s *Typed[S, D]) Unused() []string {
 	return s.unused

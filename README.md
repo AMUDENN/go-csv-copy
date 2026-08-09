@@ -53,6 +53,10 @@ go get github.com/AMUDENN/go-csv-copy
 import "github.com/AMUDENN/go-csv-copy"   // package csvcopy
 ```
 
+Go 1.24 or newer. The `go` directive names a minor version on purpose: pinning a patch would force
+every consumer to fetch a toolchain, which is a strange thing for a package whose whole point is
+bringing nothing with it.
+
 ⸻
 
 ## 🚀 Quick start
@@ -107,10 +111,13 @@ if err != nil {
     return err
 }
 
-source := csvcopy.NewCopy(rows, len(clientColumns),
+source, err := csvcopy.NewCopy(rows, len(clientColumns),
     func(dst []any, c *Client) []any {
         return append(dst, c.ID, c.Email, c.Balance, c.CreatedAt)
     })
+if err != nil {
+    return err
+}
 
 _, err = tx.CopyFrom(ctx, pgx.Identifier{"clients_tmp"}, clientColumns, source)
 if err != nil {
@@ -180,6 +187,9 @@ return reader.Err()
 | `NewTyped[S, D](r, convert, opts...)` | `*Typed[S, D]` — `RowSource[D]` | the shape comes from `csv` tags |
 | `NewCopy[T](src, columns, encode)` | `*Copy[T]` — `pgx.CopyFromSource` | adapting any `RowSource[T]` to COPY |
 
+Every constructor returns an error rather than panicking. Nil wiring — a nil reader, `convert`, `src`
+or `encode` — is `ErrSchema`.
+
 ### Interfaces
 
 ```go
@@ -207,6 +217,29 @@ type RowSource[T any] interface {
 | `WithAllowMissingColumns(bool)` | `false` | do not fail when a tagged column is absent from the header |
 | `WithPointerValues(bool)` | `false` | `Raw` yields `*string` instead of `string`, removing one allocation per cell |
 
+### The `csv` tag
+
+The whole tag is the column name. There are no comma-separated options: a field tagged
+`csv:"name,omitempty"` asks for a column literally called `name,omitempty`, which no header will
+have, and `ErrMissingColumns` says so. `-` is the one value with a meaning of its own — it drops the
+field.
+
+Two rules exist because breaking them loses data silently, and the package refuses both with
+`ErrSchema`:
+
+```go
+type row struct {
+    base                       // ✗ tags inside an embedded struct are not matched
+    A string `csv:"id"`
+    B string `csv:"id"`        // ✗ two fields, one column
+}
+```
+
+Embedded fields are not walked into. Left to pass, a tag one level down would bind to nothing, the
+field would read as empty on every row, and the column it named would reach the database as `NULL` —
+the same damage `ErrMissingColumns` exists to prevent, only without the error. List the columns on
+the struct itself.
+
 ### Diagnostics
 
 | Method | Gives |
@@ -216,7 +249,7 @@ type RowSource[T any] interface {
 | `Columns()` / `Header()` | the header as read and normalized |
 | `Record()` | the raw record last read, for error messages |
 | `Unused()` | header columns no tag bound to |
-| `Line()` | the 1-based line number of the current row |
+| `Line()` | the 1-based **physical** line of the file the current row starts on |
 | `Rows()` | how many rows have been handed out |
 
 `Unused()` is worth logging as a warning: when an export renames a column, the tag simply matches
@@ -235,13 +268,18 @@ Errors are split by who can fix them.
 |---|---|---|
 | `ErrParse` | — | a malformed record, a failing `convert`, a read failure |
 | `ErrMissingColumns` | yes | the header lacks a column a tag asks for |
-| `ErrSchema` | **no** | a bug in the calling code: not a struct, a tag on a non-string or unexported field, a nil reader or convert, an unusable delimiter |
+| `ErrSchema` | **no** | a bug in the calling code: not a struct, a tag on a non-string or unexported field, a tag inside an embedded struct, two fields asking for one column, a nil reader/convert/src/encode, an unusable delimiter |
 
 Everything a file can cause wraps `ErrParse` and carries the line number:
 
 ```
-csv parse: line 4213: record on line 4213: wrong number of fields
+csv parse: record on line 4213: wrong number of fields
+csv parse: line 4213: balance: strconv.ParseFloat: parsing "n/a": invalid syntax
 ```
+
+The line is the physical line of the file, not a count of records, so it stays right across blank
+lines (`encoding/csv` skips them) and quoted fields spanning several lines. It is what `Line()`
+returns, and the number to open the file at.
 
 If your application already has a sentinel for a bad file, alias it and every existing `errors.Is`
 check keeps working:
@@ -266,8 +304,8 @@ run — including a run on an empty file.
   worse than a failed load. The error is available from `Err()`, and it stays there — a source that
   has failed yields nothing more, so ranging `All()` a second time cannot resume past the bad row.
   Breaking out of a loop is different: that is not an error, and the next pull carries on.
-- **`Record()` names the row that failed**, as far as `encoding/csv` got with it. `Line()` names its
-  number.
+- **`Record()` names the row that failed**, as far as `encoding/csv` got with it. `Line()` names the
+  physical line it starts on.
 - **Memory is constant** and independent of the row count. `Values()` reuses one slice, which is
   safe under `pgx.CopyFrom` because it encodes a row before asking for the next. If you drive a
   source by hand, do not retain the result of `Values()` between iterations.
@@ -283,11 +321,11 @@ where from. 100k rows of 5 columns, go1.26.1, Ryzen 5 7500F:
 
 | | ns/op | B/op | allocs/op | per row |
 |---|---|---|---|---|
-| `Typed` | 14.4 ms | 3.2 MB | 100 038 | 1 |
-| `Typed` via `All()` | 14.0 ms | 3.2 MB | 100 038 | 1 |
-| `Raw` | 18.6 ms | 11.2 MB | 600 033 | 6 |
-| `Raw` via `All()` | 18.6 ms | 11.2 MB | 600 033 | 6 |
-| `Raw` + `WithPointerValues` | 10.9 ms | 3.2 MB | 100 033 | 1 |
+| `Typed` | 13.6 ms | 3.2 MB | 100 038 | 1 |
+| `Typed` via `All()` | 14.4 ms | 3.2 MB | 100 038 | 1 |
+| `Raw` | 18.7 ms | 11.2 MB | 600 033 | 6 |
+| `Raw` via `All()` | 20.6 ms | 11.2 MB | 600 032 | 6 |
+| `Raw` + `WithPointerValues` | 11.2 ms | 3.2 MB | 100 033 | 1 |
 
 Ranging costs nothing: an `iter.Seq` returned from a method closes over the source once per pass,
 not once per row, so `All()` sits on the same allocation count as the `Next()` loop it replaces.

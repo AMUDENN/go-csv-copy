@@ -1,6 +1,7 @@
 package csvcopy
 
 import (
+	"encoding/csv"
 	"errors"
 	"io"
 	"reflect"
@@ -32,6 +33,24 @@ func (t *trickleReader) Read(p []byte) (int, error) {
 	t.pos++
 
 	return 1, nil
+}
+
+// brokenReader hands out its data and then fails, standing in for a stream that
+// breaks after the header has already been read.
+type brokenReader struct {
+	data []byte
+	pos  int
+	err  error
+}
+
+func (b *brokenReader) Read(p []byte) (int, error) {
+	if b.pos >= len(b.data) {
+		return 0, b.err
+	}
+	n := copy(p, b.data[b.pos:])
+	b.pos += n
+
+	return n, nil
 }
 
 func readAll(t *testing.T, r *Reader) [][]string {
@@ -361,6 +380,119 @@ func TestReaderErrIsNilUntilSomethingFails(t *testing.T) {
 
 	if got := reader.Err(); got != nil {
 		t.Errorf("Err() after a clean pass = %v, want nil - end of file is not an error", got)
+	}
+}
+
+/*
+Line is the physical line of the file, not a count of records.
+
+Two things pull the two apart: encoding/csv skips blank lines, and a quoted field
+may span several of them. The caller opens the file at whatever number an error
+carries, so it has to be the number an editor shows - counting records would send
+them to the wrong row, and the further into the file, the further off.
+
+	1  a;b
+	2
+	3  1;2
+	4  "x
+	5  y
+	6  z";4
+	7  5        <- one field where the header has two
+*/
+func TestReaderLineIsPhysicalNotARecordCount(t *testing.T) {
+	reader, err := NewReader(strings.NewReader("a;b\n\n1;2\n\"x\ny\nz\";4\n5\n"))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if got, want := reader.Line(), 1; got != want {
+		t.Errorf("Line() after the header = %d, want %d", got, want)
+	}
+
+	for _, want := range []int{3, 4} {
+		if _, err = reader.Read(); err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if got := reader.Line(); got != want {
+			t.Errorf("Line() = %d, want %d", got, want)
+		}
+	}
+
+	if _, err = reader.Read(); err == nil {
+		t.Fatal("Read: expected an error for a short record")
+	}
+	if got, want := reader.Line(), 7; got != want {
+		t.Errorf("Line() after the failure = %d, want %d", got, want)
+	}
+	if !strings.Contains(err.Error(), "line 7") {
+		t.Errorf("error %q does not name line 7", err)
+	}
+}
+
+// csv.ParseError names the line in its own message, so the wrapper must not name
+// it again: "line 3: record on line 3: ..." reads like two different lines.
+func TestReaderParseErrorNamesTheLineOnce(t *testing.T) {
+	reader, err := NewReader(strings.NewReader("a;b\n1\n"))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+
+	_, err = reader.Read()
+	if err == nil {
+		t.Fatal("Read: expected an error for a short record")
+	}
+	if got := strings.Count(err.Error(), "line 2"); got != 1 {
+		t.Errorf("error %q names the line %d times, want once", err, got)
+	}
+}
+
+/*
+A stream that breaks mid-file is an ErrParse like any other, and still carries a
+line.
+
+encoding/csv passes an I/O error through as itself rather than wrapping it in a
+csv.ParseError, so there is no line to take from it and the count kept here is
+what names the record. That is the one case where the two ways of numbering
+cannot agree, and a count is the best available answer.
+*/
+func TestReaderPropagatesMidStreamReadError(t *testing.T) {
+	want := errors.New("network is down")
+
+	reader, err := NewReader(&brokenReader{data: []byte("a;b\n1;2\n"), err: want})
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if _, err = reader.Read(); err != nil {
+		t.Fatalf("Read row 1: %v", err)
+	}
+
+	_, err = reader.Read()
+	if !errors.Is(err, want) {
+		t.Fatalf("Read = %v, want it to wrap %v", err, want)
+	}
+	if !errors.Is(err, ErrParse) {
+		t.Errorf("error %v does not wrap ErrParse", err)
+	}
+	if !strings.Contains(err.Error(), "line 3") {
+		t.Errorf("error %q does not name line 3", err)
+	}
+	if got, want := reader.Line(), 3; got != want {
+		t.Errorf("Line() = %d, want %d", got, want)
+	}
+}
+
+/*
+recordLine's guard is for a record with no fields at all.
+
+encoding/csv does not produce one today - a blank line is skipped rather than
+returned - so nothing above can reach this branch. The guard stays because
+FieldPos panics on a field it does not have, and a future version of encoding/csv
+is not the right place to find that out.
+*/
+func TestRecordLineWithoutFields(t *testing.T) {
+	cr := csv.NewReader(strings.NewReader("a\n"))
+
+	if got, want := recordLine(cr, nil, 42), 42; got != want {
+		t.Errorf("recordLine(nil) = %d, want the fallback %d", got, want)
 	}
 }
 

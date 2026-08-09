@@ -27,10 +27,23 @@ func (s *slice[T]) Value() T { return s.items[s.pos-1] }
 
 func (s *slice[T]) Err() error { return s.err }
 
+// newCopy is NewCopy for the cases whose wiring is known good, so that the tests
+// below stay about what Copy does rather than about its constructor.
+func newCopy[T any](t *testing.T, src RowSource[T], columns int, encode func(dst []any, item T) []any) *Copy[T] {
+	t.Helper()
+
+	source, err := NewCopy(src, columns, encode)
+	if err != nil {
+		t.Fatalf("NewCopy: %v", err)
+	}
+
+	return source
+}
+
 func TestCopy(t *testing.T) {
 	src := &slice[*entity]{items: []*entity{{ID: "1", Name: "Alice"}, {ID: "2", Name: "Bob"}}}
 
-	source := NewCopy(src, 2, func(dst []any, e *entity) []any {
+	source := newCopy(t, src, 2, func(dst []any, e *entity) []any {
 		return append(dst, e.ID, e.Name)
 	})
 
@@ -49,7 +62,7 @@ func TestCopy(t *testing.T) {
 
 func TestCopyPropagatesSourceError(t *testing.T) {
 	want := errors.New("boom")
-	source := NewCopy(&slice[int]{err: want}, 1, func(dst []any, i int) []any {
+	source := newCopy(t, &slice[int]{err: want}, 1, func(dst []any, i int) []any {
 		return append(dst, i)
 	})
 
@@ -69,7 +82,7 @@ the result of append here would pay that allocation forever.
 func TestCopyGrowsBackingSliceOnce(t *testing.T) {
 	src := &slice[int]{items: []int{1, 2, 3, 4}}
 
-	source := NewCopy(src, 1, func(dst []any, i int) []any {
+	source := newCopy(t, src, 1, func(dst []any, i int) []any {
 		return append(dst, i, i, i, i, i)
 	})
 
@@ -88,7 +101,7 @@ func TestCopyGrowsBackingSliceOnce(t *testing.T) {
 
 // A nonsense column count must not panic on make(); it only sizes a buffer.
 func TestCopyNegativeColumns(t *testing.T) {
-	source := NewCopy(&slice[int]{items: []int{7}}, -1, func(dst []any, i int) []any {
+	source := newCopy(t, &slice[int]{items: []int{7}}, -1, func(dst []any, i int) []any {
 		return append(dst, i)
 	})
 
@@ -97,23 +110,29 @@ func TestCopyNegativeColumns(t *testing.T) {
 	}
 }
 
+/*
+Nil wiring is ErrSchema, not a panic.
+
+A nil src or encode is the same class of mistake as a nil reader or convert, and
+the package has one answer for that class. Reporting it two different ways would
+force a caller to guard the constructors two different ways.
+*/
 func TestCopyNilArguments(t *testing.T) {
 	t.Run("nil src", func(t *testing.T) {
-		defer func() {
-			if recover() == nil {
-				t.Error("NewCopy did not panic on a nil source")
-			}
-		}()
-		NewCopy[int](nil, 1, func(dst []any, i int) []any { return dst })
+		_, err := NewCopy[int](nil, 1, func(dst []any, i int) []any { return dst })
+		if !errors.Is(err, ErrSchema) {
+			t.Fatalf("error = %v, want ErrSchema", err)
+		}
+		if errors.Is(err, ErrParse) {
+			t.Error("ErrSchema must not wrap ErrParse: no input file will ever fix it")
+		}
 	})
 
 	t.Run("nil encode", func(t *testing.T) {
-		defer func() {
-			if recover() == nil {
-				t.Error("NewCopy did not panic on a nil encode")
-			}
-		}()
-		NewCopy[int](&slice[int]{}, 1, nil)
+		_, err := NewCopy[int](&slice[int]{}, 1, nil)
+		if !errors.Is(err, ErrSchema) {
+			t.Fatalf("error = %v, want ErrSchema", err)
+		}
 	})
 }
 
@@ -125,7 +144,7 @@ func TestCopyOverTyped(t *testing.T) {
 		t.Fatalf("NewTyped: %v", err)
 	}
 
-	source := NewCopy(rows, 2, func(dst []any, e *entity) []any {
+	source := newCopy(t, rows, 2, func(dst []any, e *entity) []any {
 		return append(dst, e.ID, e.Name)
 	})
 
@@ -143,7 +162,7 @@ func TestCopyOverTypedSurfacesParseError(t *testing.T) {
 		t.Fatalf("NewTyped: %v", err)
 	}
 
-	source := NewCopy(rows, 2, func(dst []any, e *entity) []any {
+	source := newCopy(t, rows, 2, func(dst []any, e *entity) []any {
 		return append(dst, e.ID, e.Name)
 	})
 

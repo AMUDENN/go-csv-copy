@@ -15,12 +15,17 @@ visible.
 Measured on go1.26.1 windows/amd64, one run at -benchtime=3x, 100k rows of 5
 columns:
 
-	BenchmarkRaw-6                18.6 ms   11.2 MB   600033 allocs   (6 per row)
-	BenchmarkRawAll-6             18.6 ms   11.2 MB   600033 allocs   (6 per row)
-	BenchmarkRawPointerValues-6   10.9 ms    3.2 MB   100033 allocs   (1 per row)
-	BenchmarkTyped-6              14.4 ms    3.2 MB   100038 allocs   (1 per row)
-	BenchmarkTypedAll-6           14.0 ms    3.2 MB   100038 allocs   (1 per row)
-	BenchmarkTypedCopy-6          22.0 ms   11.2 MB   600039 allocs   (6 per row)
+	BenchmarkRaw-6                18.7 ms   11.2 MB   600033 allocs   (6 per row)
+	BenchmarkRawAll-6             20.6 ms   11.2 MB   600032 allocs   (6 per row)
+	BenchmarkRawPointerValues-6   11.2 ms    3.2 MB   100033 allocs   (1 per row)
+	BenchmarkTyped-6              13.6 ms    3.2 MB   100038 allocs   (1 per row)
+	BenchmarkTypedAll-6           14.4 ms    3.2 MB   100038 allocs   (1 per row)
+	BenchmarkTypedCopy-6          22.2 ms   11.2 MB   600042 allocs   (6 per row)
+	BenchmarkNewTyped-6            4.0 us    6.0 kB       38 allocs   (per file)
+
+Three runs is far too few to say anything about ns/op - treat those as an order
+of magnitude and compare allocs/op, which is stable to the allocation. The point
+of -benchtime=3x is that each iteration walks 100k rows already.
 
 Live-memory is constant; these are allocations over the whole pass, and the
 per-row counts are accounted for:
@@ -41,7 +46,8 @@ allocation. Ranging is a way of writing the loop, not a second cost.
 
 Watch for: allocs/op climbing above (columns + 1) per row, an All benchmark
 drifting away from its Next counterpart, or any growth in BenchmarkNewTyped,
-which is pure per-file setup.
+which is pure per-file setup and the only place a new check on the struct can
+show up. Its 38 allocations are reflect and the plan, paid once per file.
 */
 const benchRows = 100_000
 
@@ -128,9 +134,12 @@ func BenchmarkTypedCopy(b *testing.B) {
 			b.Fatal(err)
 		}
 
-		source := NewCopy(rows, 5, func(dst []any, r benchRow) []any {
+		source, err := NewCopy(rows, 5, func(dst []any, r benchRow) []any {
 			return append(dst, r.ID, r.LastName, r.FirstName, r.Birthdate, r.AddressID)
 		})
+		if err != nil {
+			b.Fatal(err)
+		}
 
 		for source.Next() {
 			if _, err = source.Values(); err != nil {

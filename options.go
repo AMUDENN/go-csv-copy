@@ -10,7 +10,7 @@ type settings struct {
 	lazyQuotes       bool
 	trimLeadingSpace bool
 	trimValues       bool
-	headerRow        uint
+	headerRow        int
 	normalizeHeader  func(string) string
 	tag              string
 	variableColumns  bool
@@ -81,12 +81,21 @@ func WithTrimValues(trim bool) Option {
 }
 
 /*
+headerRowLimit caps WithHeaderRow so the count stays a usable int on every
+platform, 32-bit ones included. A header a million rows down is the empty-file
+case long before the cap could matter.
+*/
+const headerRowLimit = 1 << 20
+
+/*
 WithHeaderRow sets which row holds the header, counting from 1. Rows before it
 are read and dropped, so a file may carry a title or a note above its table.
 Defaults to 1.
+
+A header past the end of the file is the empty-file case, not an error.
 */
 func WithHeaderRow(row uint) Option {
-	return func(s *settings) { s.headerRow = row }
+	return func(s *settings) { s.headerRow = int(min(row, headerRowLimit)) }
 }
 
 // WithNormalizeHeader replaces the header normalizer. Passing nil restores
@@ -95,7 +104,14 @@ func WithNormalizeHeader(fn func(string) string) Option {
 	return func(s *settings) { s.normalizeHeader = fn }
 }
 
-// WithTag sets the struct tag Typed reads column names from. Defaults to "csv".
+/*
+WithTag sets the struct tag Typed reads column names from. Defaults to "csv".
+
+The whole tag is the column name. There are no comma-separated options - a field
+tagged `csv:"name,omitempty"` asks for a column literally called
+"name,omitempty", which no header will have. The only value with a meaning of its
+own is "-", which drops the field.
+*/
 func WithTag(tag string) Option {
 	return func(s *settings) { s.tag = tag }
 }

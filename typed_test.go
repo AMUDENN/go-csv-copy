@@ -229,6 +229,157 @@ func TestTypedMalformedRecord(t *testing.T) {
 	}
 }
 
+/*
+A convert error names the physical line too.
+
+It goes through Reader.wrap rather than through encoding/csv, so it is the path
+where a record count would surface instead - and it is the path a caller is most
+likely to act on, because a rejected value is something they have to go and look
+at in the file.
+
+	1  id;name
+	2  "1
+	3  x";Alice
+	4  ;Bob      <- toEntity rejects an empty id
+*/
+func TestTypedConvertErrorNamesThePhysicalLine(t *testing.T) {
+	src, err := NewTyped(strings.NewReader("id;name\n\"1\nx\";Alice\n;Bob\n"), toEntity)
+	if err != nil {
+		t.Fatalf("NewTyped: %v", err)
+	}
+
+	if got := collect(t, src); len(got) != 1 {
+		t.Fatalf("got %d rows before the error, want 1", len(got))
+	}
+
+	err = src.Err()
+	if !strings.Contains(err.Error(), "line 4") {
+		t.Errorf("Err() = %q, want it to name line 4", err)
+	}
+	if got, want := src.Line(), 4; got != want {
+		t.Errorf("Line() = %d, want %d", got, want)
+	}
+}
+
+/*
+A tag inside an embedded struct is refused rather than ignored.
+
+taggedFields walks the fields of S and nothing else, so a tag one level down never
+reaches the header matcher: no error, the field is never written, and the column
+it named reaches the database as NULL on every row. That is exactly what
+ErrMissingColumns exists to prevent, except silent - the only trace is the column
+turning up in Unused.
+
+Decoding into embedded structs would be a feature. Until it is one, the failure
+has to be loud.
+*/
+func TestTypedEmbeddedTagsAreRefused(t *testing.T) {
+	type identity struct {
+		ID string `csv:"id"`
+	}
+	type deeper struct {
+		identity
+	}
+
+	t.Run("embedded struct", func(t *testing.T) {
+		type row struct {
+			identity
+			Name string `csv:"name"`
+		}
+		_, err := NewTyped(strings.NewReader("id;name\n"), func(*row) (int, error) { return 0, nil })
+		if !errors.Is(err, ErrSchema) {
+			t.Fatalf("error = %v, want ErrSchema", err)
+		}
+		if !strings.Contains(err.Error(), "identity") {
+			t.Errorf("error %q does not name the embedded type", err)
+		}
+	})
+
+	t.Run("embedded pointer", func(t *testing.T) {
+		type row struct {
+			*identity
+			Name string `csv:"name"`
+		}
+		_, err := NewTyped(strings.NewReader("id;name\n"), func(*row) (int, error) { return 0, nil })
+		if !errors.Is(err, ErrSchema) {
+			t.Fatalf("error = %v, want ErrSchema", err)
+		}
+	})
+
+	// The tag may be any number of levels down; each one hides it just as well.
+	t.Run("embedded two levels down", func(t *testing.T) {
+		type row struct {
+			deeper
+			Name string `csv:"name"`
+		}
+		_, err := NewTyped(strings.NewReader("id;name\n"), func(*row) (int, error) { return 0, nil })
+		if !errors.Is(err, ErrSchema) {
+			t.Fatalf("error = %v, want ErrSchema", err)
+		}
+	})
+
+	// Only a tag is refused. Embedding is otherwise the caller's business, and a
+	// struct embedded for its methods must keep working.
+	t.Run("embedded without tags is fine", func(t *testing.T) {
+		type plain struct {
+			Note string
+		}
+		type row struct {
+			plain
+			Name string `csv:"name"`
+		}
+		if _, err := NewTyped(strings.NewReader("name\n"), func(*row) (int, error) { return 0, nil }); err != nil {
+			t.Fatalf("NewTyped: %v", err)
+		}
+	})
+}
+
+// A struct that embeds itself through a pointer must not send the walk into an
+// endless recursion.
+func TestTypedSelfEmbeddingDoesNotRecurse(t *testing.T) {
+	type row struct {
+		*row        //nolint:unused // embedding itself is the cycle the walk has to survive
+		Name string `csv:"name"`
+	}
+
+	if _, err := NewTyped(strings.NewReader("name\n"), func(*row) (int, error) { return 0, nil }); err != nil {
+		t.Fatalf("NewTyped: %v", err)
+	}
+}
+
+// Two fields asking for one column is a copy-paste slip far more often than an
+// intent, and nothing downstream can tell the two apart.
+func TestTypedDuplicateTagIsRefused(t *testing.T) {
+	type row struct {
+		A string `csv:"id"`
+		B string `csv:"id"`
+	}
+
+	_, err := NewTyped(strings.NewReader("id\n"), func(*row) (int, error) { return 0, nil })
+	if !errors.Is(err, ErrSchema) {
+		t.Fatalf("error = %v, want ErrSchema", err)
+	}
+	for _, name := range []string{"A", "B", "id"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("error %q does not name %q", err, name)
+		}
+	}
+}
+
+// The normalizer runs before the duplicate check, so two tags that differ only in
+// whitespace still collide - they name one column.
+func TestTypedDuplicateTagAfterNormalization(t *testing.T) {
+	type row struct {
+		A string `csv:"date of birth"`
+		B string `csv:"date  of\tbirth"`
+	}
+
+	_, err := NewTyped(strings.NewReader("date of birth\n"), func(*row) (int, error) { return 0, nil })
+	if !errors.Is(err, ErrSchema) {
+		t.Fatalf("error = %v, want ErrSchema", err)
+	}
+}
+
 func TestTypedUnused(t *testing.T) {
 	src, err := NewTyped(strings.NewReader("id;name;renamed_away;spare\n"), toEntity)
 	if err != nil {
@@ -364,9 +515,12 @@ func ExampleNewTyped() {
 		panic(err)
 	}
 
-	source := NewCopy(rows, 2, func(dst []any, e *entity) []any {
+	source, err := NewCopy(rows, 2, func(dst []any, e *entity) []any {
 		return append(dst, e.ID, e.Name)
 	})
+	if err != nil {
+		panic(err)
+	}
 
 	// tx.CopyFrom(ctx, pgx.Identifier{"people"}, []string{"id", "name"}, source)
 	for source.Next() {

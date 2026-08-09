@@ -65,12 +65,12 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 
 	reader := &Reader{settings: set}
 
-	for row := uint(1); row < set.headerRow; row++ {
+	for row := 1; row < set.headerRow; row++ {
 		if _, err = cr.Read(); err != nil {
 			if errors.Is(err, io.EOF) {
 				return reader, nil
 			}
-			return nil, parseError(int(row), err)
+			return nil, parseError(row, err)
 		}
 	}
 
@@ -79,7 +79,7 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 		if errors.Is(err, io.EOF) {
 			return reader, nil
 		}
-		return nil, parseError(int(set.headerRow), err)
+		return nil, parseError(set.headerRow, err)
 	}
 
 	reader.columns = make([]string, len(header))
@@ -87,7 +87,7 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 		reader.columns[i] = set.normalizeHeader(name)
 	}
 	reader.cr = cr
-	reader.line = int(set.headerRow)
+	reader.line = recordLine(cr, header, set.headerRow)
 
 	if !set.variableColumns {
 		cr.FieldsPerRecord = len(header)
@@ -105,8 +105,16 @@ func (r *Reader) Columns() []string {
 	return r.columns
 }
 
-// Line is the 1-based number of the record the reader is on, counting the header.
-// After a failed Read it names the record that failed.
+/*
+Line is the 1-based line of the file the current record starts on.
+
+It is the physical line, taken from encoding/csv rather than counted here, so it
+stays right across the two things that make a record count drift from it: blank
+lines, which encoding/csv skips, and a quoted field spanning several lines. That
+number is the one an error message must carry - the caller opens the file at it.
+
+After a failed Read it names the record that failed.
+*/
 func (r *Reader) Line() int {
 	return r.line
 }
@@ -151,13 +159,13 @@ func (r *Reader) Read() ([]string, error) {
 		// its backing array is the previous record's. Keeping the old one here
 		// would leave Record holding a row that was never in the file: the fields
 		// this record did have, padded out with the last one's leftovers.
-		r.line++
+		r.line = errorLine(r.line+1, err)
 		r.record = record
 		r.err = parseError(r.line, err)
 
 		return nil, r.err
 	}
-	r.line++
+	r.line = recordLine(r.cr, record, r.line+1)
 
 	if r.settings.trimValues {
 		for i, value := range record {
@@ -229,13 +237,48 @@ func validComma(comma rune) bool {
 	return utf8.ValidRune(comma)
 }
 
-// parseError prefers the line encoding/csv reports, which is accurate even when
-// a quoted field spans several physical lines.
+/*
+recordLine is the physical line the record just read starts on.
+
+encoding/csv tracks it through blank lines, which it skips, and through a quoted
+field spanning several lines - neither of which a record counter here can see.
+fallback covers the record that has no field to ask about, which encoding/csv
+does not currently produce: a blank line is skipped rather than returned.
+*/
+func recordLine(cr *csv.Reader, record []string, fallback int) int {
+	if len(record) == 0 {
+		return fallback
+	}
+
+	line, _ := cr.FieldPos(0)
+
+	return line
+}
+
+// errorLine prefers the line encoding/csv reports, which is accurate even when a
+// quoted field spans several physical lines.
+func errorLine(fallback int, err error) int {
+	var parseErr *csv.ParseError
+	if errors.As(err, &parseErr) {
+		return parseErr.Line
+	}
+
+	return fallback
+}
+
+/*
+parseError attributes err to a line.
+
+A csv.ParseError already names the line in its own message, so repeating it here
+would print it twice - "line 12: record on line 12: ..." - for the error type
+that produces most of these.
+*/
 func parseError(line int, err error) error {
 	var parseErr *csv.ParseError
 	if errors.As(err, &parseErr) {
-		line = parseErr.Line
+		return fmt.Errorf("%w: %w", ErrParse, err)
 	}
+
 	return fmt.Errorf("%w: line %d: %w", ErrParse, line, err)
 }
 
