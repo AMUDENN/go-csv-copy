@@ -1,0 +1,10 @@
+.idea/
+.vscode/
+.claude/
+.docs/
+
+*.exe
+*.test
+*.out
+coverage.*
+CLAUDE.md

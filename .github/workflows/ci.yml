@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main, develop]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.1'
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      # The action major must match the linter major: v6 refuses a v2 linter
+      # outright, and .golangci.yml here is `version: "2"`.
+      - name: lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+
+      # The race detector needs cgo, which is why this runs here rather than on a
+      # bare Windows checkout.
+      - name: test
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: coverage
+        run: go tool cover -func=coverage.out | tail -1
+
+      # Not a performance gate, just proof the benchmarks still compile and run.
+      - name: bench
+        run: go test -bench=. -benchmem -benchtime=1x ./...
+
+      # The whole point of the package is that it needs nothing but the standard
+      # library. A stray require would make every consumer inherit it.
+      - name: no dependencies
+        run: |
+          if grep -q '^require' go.mod; then
+            echo "go.mod gained a require block; csvcopy must stay dependency-free"
+            exit 1
+          fi

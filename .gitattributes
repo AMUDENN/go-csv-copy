@@ -1,0 +1,3 @@
+# Checked out with LF everywhere: the repository is written on Windows but CI runs
+# gofmt on Linux, and CRLF would make every file look unformatted there.
+* text=auto eol=lf

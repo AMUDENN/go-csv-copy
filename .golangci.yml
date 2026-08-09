@@ -1,0 +1,63 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    # Error handling is the whole contract of this package, so the linters that
+    # check it are not optional.
+    - errorlint
+    - nilerr
+    - wrapcheck
+
+    - gocritic
+    - revive
+    - predeclared
+    - unconvert
+    - wastedassign
+    - misspell
+    - nolintlint
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+    revive:
+      rules:
+        - name: exported
+          disabled: true # doc comments are block-style here, revive wants a prefix
+
+    wrapcheck:
+      # This list REPLACES wrapcheck's defaults, so the defaults are restated
+      # first - without them fmt.Errorf stops counting as wrapping and every
+      # sentinel we build gets reported.
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - errors.Join(
+        - .Wrap(
+        - .Wrapf(
+        - .WithMessage(
+        - .WithMessagef(
+        - .WithStack(
+        # Passing a source's error through unchanged is the contract of Err():
+        # it already names the line, and wrapping it twice only adds noise.
+        - .Err(
+        # skipBOM hands the raw read error to NewReader, which wraps it once.
+        - io.ReadFull(
+
+  exclusions:
+    rules:
+      - path: _test\.go$
+        linters:
+          - wrapcheck
+          - gocritic
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

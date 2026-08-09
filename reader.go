@@ -1,0 +1,267 @@
+package csvcopy
+
+import (
+	"bytes"
+	"encoding/csv"
+	"errors"
+	"fmt"
+	"io"
+	"iter"
+	"strings"
+	"unicode/utf8"
+)
+
+const bomLen = 3
+
+var bomPrefix = [bomLen]byte{0xEF, 0xBB, 0xBF}
+
+/*
+Reader is the bottom layer both sources are built on: it strips a UTF-8 BOM,
+configures encoding/csv, and reads the header.
+
+It reads one record at a time and never holds more than the current one, which is
+what keeps the whole pipeline to a constant amount of memory no matter how large
+the file is. It does not close the underlying io.Reader.
+*/
+type Reader struct {
+	cr       *csv.Reader
+	settings settings
+	columns  []string
+	record   []string
+	line     int
+	err      error
+}
+
+/*
+NewReader reads the header and prepares the reader for row-by-row use.
+
+An empty input is not an error: Columns returns nil and Read returns io.EOF at
+once. What an empty file means is the caller's decision, not this package's.
+*/
+func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
+	if r == nil {
+		return nil, fmt.Errorf("%w: reader is nil", ErrSchema)
+	}
+
+	set := newSettings(opts)
+
+	if !validComma(set.comma) {
+		return nil, fmt.Errorf("%w: %q is not a usable delimiter", ErrSchema, set.comma)
+	}
+
+	body, err := skipBOM(r)
+	if err != nil {
+		return nil, fmt.Errorf("%w: read bom: %w", ErrParse, err)
+	}
+
+	cr := csv.NewReader(body)
+	cr.Comma = set.comma
+	cr.LazyQuotes = set.lazyQuotes
+	cr.TrimLeadingSpace = set.trimLeadingSpace
+	cr.ReuseRecord = true
+	// A title above the table is usually narrower than the table itself, so the
+	// field count is only pinned once the header has been read.
+	cr.FieldsPerRecord = -1
+
+	reader := &Reader{settings: set}
+
+	for row := uint(1); row < set.headerRow; row++ {
+		if _, err = cr.Read(); err != nil {
+			if errors.Is(err, io.EOF) {
+				return reader, nil
+			}
+			return nil, parseError(int(row), err)
+		}
+	}
+
+	header, err := cr.Read()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return reader, nil
+		}
+		return nil, parseError(int(set.headerRow), err)
+	}
+
+	reader.columns = make([]string, len(header))
+	for i, name := range header {
+		reader.columns[i] = set.normalizeHeader(name)
+	}
+	reader.cr = cr
+	reader.line = int(set.headerRow)
+
+	if !set.variableColumns {
+		cr.FieldsPerRecord = len(header)
+	}
+
+	return reader, nil
+}
+
+/*
+Columns returns the header as it was read and normalized, or nil if the input was
+empty. The slice is shared, not copied - it is handed straight to pgx.CopyFrom,
+which does not modify it.
+*/
+func (r *Reader) Columns() []string {
+	return r.columns
+}
+
+// Line is the 1-based number of the record the reader is on, counting the header.
+// After a failed Read it names the record that failed.
+func (r *Reader) Line() int {
+	return r.line
+}
+
+/*
+Record returns the record last read, for error messages that need the offending
+row rather than just its number.
+
+After a failed Read it holds that record as far as encoding/csv got with it, or
+nil where it could not produce one at all.
+
+Only valid until the next Read: the backing slice is reused.
+*/
+func (r *Reader) Record() []string {
+	return r.record
+}
+
+/*
+Read returns the next record, or io.EOF when there are none left.
+
+The first bad record ends the reader: the error is returned again by every later
+call and stays in Err. Rows are never skipped, so a caller cannot resume past a
+bad record and mistake a truncated file for a whole one.
+
+The returned slice is reused by the next call. Every error other than io.EOF wraps
+ErrParse and carries the line number.
+*/
+func (r *Reader) Read() ([]string, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	if r.cr == nil {
+		return nil, io.EOF
+	}
+
+	record, err := r.cr.Read()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, io.EOF
+		}
+		// encoding/csv hands the partial record back along with ErrFieldCount, and
+		// its backing array is the previous record's. Keeping the old one here
+		// would leave Record holding a row that was never in the file: the fields
+		// this record did have, padded out with the last one's leftovers.
+		r.line++
+		r.record = record
+		r.err = parseError(r.line, err)
+
+		return nil, r.err
+	}
+	r.line++
+
+	if r.settings.trimValues {
+		for i, value := range record {
+			record[i] = strings.TrimSpace(value)
+		}
+	}
+	r.record = record
+
+	return record, nil
+}
+
+/*
+All iterates the records left in the file.
+
+Ranging cannot carry an error out, so the loop stops at the first bad record and
+Err reports it afterwards - the same shape as bufio.Scanner:
+
+	for record := range reader.All() {
+		...
+	}
+	if err := reader.Err(); err != nil {
+		return err
+	}
+
+Breaking out of the loop leaves the reader usable, and the next pull picks up
+where the range left off. An error does not: the reader is done, and ranging it
+again yields nothing rather than resuming past the record that failed.
+
+The yielded slice is reused by the next iteration. Copy it if it has to outlive
+one turn of the loop.
+*/
+func (r *Reader) All() iter.Seq[[]string] {
+	return func(yield func([]string) bool) {
+		for {
+			record, err := r.Read()
+			if err != nil || !yield(record) {
+				return
+			}
+		}
+	}
+}
+
+// Err returns the error that stopped reading, if any. End of file is not one.
+func (r *Reader) Err() error {
+	return r.err
+}
+
+// wrap attributes an error raised while handling the current record to that
+// record's line.
+func (r *Reader) wrap(err error) error {
+	return fmt.Errorf("%w: line %d: %w", ErrParse, r.line, err)
+}
+
+/*
+validComma repeats the check encoding/csv makes when it reads its first record.
+
+Done here so that an unusable delimiter is an ErrSchema from the constructor
+rather than an ErrParse on the first row: it is a bug in the calling code, no
+input file will ever fix it, and a caller that quarantines files on ErrParse must
+not act on it. Doing it up front also keeps an empty input from turning into an
+error, which the package promises it never is.
+*/
+func validComma(comma rune) bool {
+	switch comma {
+	case 0, '"', '\r', '\n', utf8.RuneError:
+		return false
+	}
+
+	return utf8.ValidRune(comma)
+}
+
+// parseError prefers the line encoding/csv reports, which is accurate even when
+// a quoted field spans several physical lines.
+func parseError(line int, err error) error {
+	var parseErr *csv.ParseError
+	if errors.As(err, &parseErr) {
+		line = parseErr.Line
+	}
+	return fmt.Errorf("%w: line %d: %w", ErrParse, line, err)
+}
+
+/*
+skipBOM drops a leading UTF-8 BOM.
+
+io.ReadFull, not Read: a Reader is allowed to return fewer bytes than asked for
+without an error, and a plain Read would then leave the BOM in place and hand a
+first column name starting with U+FEFF to the header matcher. That column matches
+no tag, and the failure surfaces far from its cause.
+*/
+func skipBOM(r io.Reader) (io.Reader, error) {
+	var prefix [bomLen]byte
+
+	n, err := io.ReadFull(r, prefix[:])
+	switch {
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		// Fewer than three bytes in total: too short to be a BOM with data after it.
+		return bytes.NewReader(prefix[:n]), nil
+	case err != nil:
+		return nil, err
+	}
+
+	if prefix == bomPrefix {
+		return r, nil
+	}
+
+	return io.MultiReader(bytes.NewReader(prefix[:]), r), nil
+}

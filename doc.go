@@ -1,0 +1,98 @@
+/*
+Package csvcopy streams CSV one row at a time.
+
+A row is read, handed over and forgotten, so memory does not depend on the size of
+the file. There are no dependencies outside the standard library.
+
+Bulk-loading into PostgreSQL is what it is shaped for, and the reason the row
+sources expose Next/Values/Err: that method set is pgx.CopyFromSource, satisfied
+structurally rather than by importing pgx, so the version of pgx stays the
+application's choice. Nothing here requires a database, though - Reader is a plain
+CSV reader, and Typed decodes into your own types. Both have All for ranging.
+
+# Layers
+
+Two ways to fix the shape of a file, because both turn up in practice.
+
+Raw takes the shape from the file's own header - whatever columns arrived, in
+their order, all as text. This is the staging table case, where a SQL script types
+the data afterwards:
+
+	src, err := csvcopy.NewRaw(file)
+	if err != nil {
+		return err
+	}
+	if len(src.Columns()) == 0 {
+		return nil // empty file, nothing to load
+	}
+	n, err := tx.CopyFrom(ctx, pgx.Identifier{table}, src.Columns(), src)
+
+Typed takes the shape from struct tags. Columns are matched by name, so the file
+may reorder them or add new ones; a column a tag asks for and the file lacks is an
+error. Every tagged field is a string, and convert turns the row into whatever the
+program actually works with - only the caller can tell an empty cell from a zero:
+
+	type row struct {
+		ID   string `csv:"id"`
+		Name string `csv:"name"`
+	}
+
+	rows, err := csvcopy.NewTyped(file, (*row).toEntity)
+	if err != nil {
+		return err
+	}
+
+	source := csvcopy.NewCopy(rows, len(columns), func(dst []any, e *entity) []any {
+		return append(dst, e.ID, e.Name)
+	})
+	n, err := tx.CopyFrom(ctx, pgx.Identifier{table}, columns, source)
+
+NewCopy adapts any RowSource - Typed, or one of your own over XLSX or an API - to
+pgx.CopyFromSource.
+
+# Without a database
+
+Reader and Typed stand on their own. Ranging stops at the first bad row and Err
+reports it afterwards, the same shape as bufio.Scanner:
+
+	rows, err := csvcopy.NewTyped(file, (*row).toEntity)
+	if err != nil {
+		return err
+	}
+
+	for entity := range rows.All() {
+		send(entity)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+Reader.All yields raw records as []string, for when no decoding is wanted either.
+
+# Guarantees
+
+An empty input is not an error: no columns, no rows, no error. The caller decides
+what that means.
+
+A UTF-8 BOM is stripped, read with io.ReadFull so a slow reader cannot leave it in
+place.
+
+The first bad row stops the stream for good. Rows are not skipped: a partly loaded
+table is worse than a failed load. The error is available from Err, names the line,
+and stays there - a source that has failed yields nothing more, so ranging All
+again cannot resume past the row that broke. Breaking out of a loop is not an
+error, and the next pull carries on from where it stopped.
+
+Record and Line name the row that failed, so an error message can carry it.
+
+Errors a file can cause wrap ErrParse, so an application can alias its own
+sentinel to it. Errors the calling code causes wrap ErrSchema instead, because no
+file will fix them.
+
+Values reuses one slice between rows. That is safe under pgx.CopyFrom, which
+encodes a row before asking for the next; a caller driving a source by hand must
+not retain it.
+
+Nothing here is safe for concurrent use, and neither is pgx.CopyFrom.
+*/
+package csvcopy
