@@ -224,6 +224,7 @@ type RowSource[T any] interface {
 | `WithAllowMissingColumns(bool)` | `false` | do not fail when a tagged column is absent from the header |
 | `WithPointerValues(bool)` | `false` | `Raw` yields `*string` instead of `string`, removing one allocation per cell |
 | `WithMaxRecordBytes(int64)` | `64 MiB` | cap on one record; zero removes it. Exceeding it is `ErrRecordTooLarge` |
+| `WithComment(rune)` | `0` (off) | a rune that starts a comment line, skipped wherever it appears |
 
 ### The `csv` tag
 

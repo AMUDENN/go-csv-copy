@@ -46,8 +46,17 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 
 	set := newSettings(opts)
 
-	if !validComma(set.comma) {
+	if !validDelim(set.comma) {
 		return nil, fmt.Errorf("%w: %q is not a usable delimiter", ErrSchema, set.comma)
+	}
+	if set.comment != 0 {
+		if !validDelim(set.comment) {
+			return nil, fmt.Errorf("%w: %q is not a usable comment rune", ErrSchema, set.comment)
+		}
+		if set.comment == set.comma {
+			return nil, fmt.Errorf("%w: the comment rune and the delimiter are both %q",
+				ErrSchema, set.comma)
+		}
 	}
 
 	body, err := skipBOM(r)
@@ -65,6 +74,7 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 
 	cr := csv.NewReader(body)
 	cr.Comma = set.comma
+	cr.Comment = set.comment
 	cr.LazyQuotes = set.lazyQuotes
 	cr.TrimLeadingSpace = set.trimLeadingSpace
 	cr.ReuseRecord = true
@@ -237,21 +247,23 @@ func (r *Reader) wrap(err error) error {
 }
 
 /*
-validComma repeats the check encoding/csv makes when it reads its first record.
+validDelim repeats the check encoding/csv makes when it reads its first record. It
+governs both the field delimiter and the comment rune, which the standard library
+holds to the same rule.
 
-Done here so that an unusable delimiter is an ErrSchema from the constructor
-rather than an ErrParse on the first row: it is a bug in the calling code, no
-input file will ever fix it, and a caller that quarantines files on ErrParse must
-not act on it. Doing it up front also keeps an empty input from turning into an
-error, which the package promises it never is.
+Done here so that an unusable rune is an ErrSchema from the constructor rather than
+an ErrParse on the first row: it is a bug in the calling code, no input file will
+ever fix it, and a caller that quarantines files on ErrParse must not act on it.
+Doing it up front also keeps an empty input from turning into an error, which the
+package promises it never is.
 */
-func validComma(comma rune) bool {
-	switch comma {
+func validDelim(delim rune) bool {
+	switch delim {
 	case 0, '"', '\r', '\n', utf8.RuneError:
 		return false
 	}
 
-	return utf8.ValidRune(comma)
+	return utf8.ValidRune(delim)
 }
 
 /*

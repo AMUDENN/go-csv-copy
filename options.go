@@ -7,6 +7,7 @@ type Option func(*settings)
 
 type settings struct {
 	comma            rune
+	comment          rune
 	lazyQuotes       bool
 	trimLeadingSpace bool
 	trimValues       bool
@@ -73,6 +74,23 @@ rather than letting the first row fail with ErrParse.
 */
 func WithComma(comma rune) Option {
 	return func(s *settings) { s.comma = comma }
+}
+
+/*
+WithComment sets a rune that starts a comment line. Zero, the default, means the
+file has no comments.
+
+A line whose first rune is this one is skipped entirely, wherever it appears -
+which is what WithHeaderRow cannot do, since that only drops a fixed number of
+lines at the top.
+
+Validated like the delimiter, and for the same reason: a comment rune equal to the
+delimiter, or one encoding/csv will not accept, is ErrSchema from the constructor
+rather than ErrParse on the first row. Skipped lines do not shift the line numbers
+in errors - those come from encoding/csv, which counts the physical file.
+*/
+func WithComment(comment rune) Option {
+	return func(s *settings) { s.comment = comment }
 }
 
 /*

@@ -9,6 +9,12 @@ below `v1.0.0` the API may still move.
 
 ### Added
 
+- **`WithComment`**, forwarding `csv.Reader.Comment`. `WithHeaderRow` drops a fixed number of lines
+  at the top, which does not help with notes scattered through a file. Validated like the
+  delimiter — a comment rune equal to it, or one `encoding/csv` will not accept, is `ErrSchema`
+  from the constructor rather than a failure on the first row. Skipped lines do not shift the line
+  numbers in errors.
+
 - **`Copy.Line()` and `Copy.Record()`**, forwarded to the wrapped source when it can answer and
   `0` / `nil` when it cannot. The documented recovery for a failed `CopyFrom` is to read the
   source's error first, because that is the one naming the line — but the obvious code passes the
