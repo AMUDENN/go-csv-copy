@@ -19,8 +19,18 @@ func (f failingReader) Read([]byte) (int, error) { return 0, f.err }
 func TestWithLazyQuotes(t *testing.T) {
 	const input = "a;b\nx\"y;z\n"
 
-	t.Run("tolerated by default", func(t *testing.T) {
+	t.Run("rejected by default", func(t *testing.T) {
 		reader, err := NewReader(strings.NewReader(input))
+		if err != nil {
+			t.Fatalf("NewReader: %v", err)
+		}
+		if _, err = reader.Read(); !errors.Is(err, ErrParse) {
+			t.Fatalf("Read error = %v, want an error wrapping ErrParse", err)
+		}
+	})
+
+	t.Run("tolerated when on", func(t *testing.T) {
+		reader, err := NewReader(strings.NewReader(input), WithLazyQuotes(true))
 		if err != nil {
 			t.Fatalf("NewReader: %v", err)
 		}
@@ -28,14 +38,85 @@ func TestWithLazyQuotes(t *testing.T) {
 			t.Errorf("records = %q, want one record", got)
 		}
 	})
+}
 
-	t.Run("rejected when off", func(t *testing.T) {
-		reader, err := NewReader(strings.NewReader(input), WithLazyQuotes(false))
+/*
+An unclosed quote is the reason lazy quoting is off by default.
+
+Verified against encoding/csv, not assumed: with lazy quoting on, the parser reads
+to EOF looking for the closing quote and the rest of the file becomes one field.
+What the caller then sees depends on the field count, which is why the default
+matters so much - the two subtests below are the same input with three different
+outcomes.
+*/
+func TestWithLazyQuotesUnclosedQuote(t *testing.T) {
+	const input = "a;b\n\"unclosed;still going\nnext;row\n"
+
+	t.Run("default reports the quote", func(t *testing.T) {
+		reader, err := NewReader(strings.NewReader(input))
 		if err != nil {
 			t.Fatalf("NewReader: %v", err)
 		}
-		if _, err = reader.Read(); !errors.Is(err, ErrParse) {
+
+		_, err = reader.Read()
+		if !errors.Is(err, ErrParse) {
 			t.Fatalf("Read error = %v, want an error wrapping ErrParse", err)
+		}
+		if !strings.Contains(err.Error(), "quote") {
+			t.Errorf("error %q does not mention the quote - it names the wrong cause", err)
+		}
+		if !strings.Contains(err.Error(), "line 2") {
+			t.Errorf("error %q does not name line 2, where the quote opened", err)
+		}
+		if reader.Err() == nil {
+			t.Error("Err() = nil after a failed Read")
+		}
+	})
+
+	/*
+		With lazy quoting on the diagnosis is lost. The record swallows the rest of
+		the file, and the only complaint left is about the field count - on the line
+		the file ended on, not the line the quote opened on.
+	*/
+	t.Run("lazy quoting hides it behind a field count", func(t *testing.T) {
+		reader, err := NewReader(strings.NewReader(input), WithLazyQuotes(true))
+		if err != nil {
+			t.Fatalf("NewReader: %v", err)
+		}
+
+		_, err = reader.Read()
+		if !errors.Is(err, ErrParse) {
+			t.Fatalf("Read error = %v, want an error wrapping ErrParse", err)
+		}
+		if strings.Contains(err.Error(), "quote") {
+			t.Errorf("error %q mentions the quote; this subtest exists because it does not", err)
+		}
+	})
+
+	/*
+		And with a variable width there is nothing left to complain about: the rest
+		of the file is one value and the load succeeds. This is the silent data loss
+		the default exists to prevent.
+	*/
+	t.Run("lazy quoting plus variable columns loses the file silently", func(t *testing.T) {
+		reader, err := NewReader(
+			strings.NewReader(input),
+			WithLazyQuotes(true),
+			WithVariableColumns(true),
+		)
+		if err != nil {
+			t.Fatalf("NewReader: %v", err)
+		}
+
+		records := readAll(t, reader)
+		if len(records) != 1 {
+			t.Fatalf("records = %q, want the rest of the file collapsed into one", records)
+		}
+		if !strings.Contains(records[0][0], "next;row") {
+			t.Errorf("record = %q, want it to have swallowed the following row", records[0])
+		}
+		if err = reader.Err(); err != nil {
+			t.Errorf("Err() = %v; this subtest exists because there is no error", err)
 		}
 	})
 }

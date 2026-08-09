@@ -21,7 +21,7 @@ type settings struct {
 func newSettings(opts []Option) settings {
 	set := settings{
 		comma:            ';',
-		lazyQuotes:       true,
+		lazyQuotes:       false,
 		trimLeadingSpace: true,
 		trimValues:       true,
 		headerRow:        1,
@@ -64,8 +64,19 @@ func WithComma(comma rune) Option {
 	return func(s *settings) { s.comma = comma }
 }
 
-// WithLazyQuotes allows a bare quote inside an unquoted field instead of
-// failing the record. Defaults to true.
+/*
+WithLazyQuotes tolerates quoting encoding/csv would otherwise reject: a bare quote
+inside an unquoted field, and a quoted field that never closes. Defaults to false.
+
+Turning it on trades a precise error for silent damage. `1;"2"3;4` becomes the
+field `2"3` with the right number of fields, so nothing objects. An unclosed quote
+is worse: the parser reads to EOF looking for the closing one and the entire rest
+of the file arrives as a single value. What surfaces then is a field-count error
+naming the line the file ended on rather than the line the quote opened on - and
+with WithVariableColumns there is no error at all.
+
+Off, the same input is a parse error naming the line and the column of the quote.
+*/
 func WithLazyQuotes(lazy bool) Option {
 	return func(s *settings) { s.lazyQuotes = lazy }
 }

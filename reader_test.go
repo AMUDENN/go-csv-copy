@@ -159,8 +159,9 @@ func TestReaderHeader(t *testing.T) {
 			records: [][]string{{"line1\nline2", "z"}},
 		},
 		{
-			name:    "bare quote is tolerated by default",
+			name:    "bare quote is tolerated when asked for",
 			input:   `a;b` + "\n" + `2";3` + "\n",
+			opts:    []Option{WithLazyQuotes(true)},
 			columns: []string{"a", "b"},
 			records: [][]string{{`2"`, "3"}},
 		},

@@ -207,7 +207,7 @@ type RowSource[T any] interface {
 | Option | Default | Effect |
 |---|---|---|
 | `WithComma(r rune)` | `';'` | field delimiter |
-| `WithLazyQuotes(bool)` | `true` | tolerate a bare quote inside a field instead of failing |
+| `WithLazyQuotes(bool)` | `false` | tolerate a bare quote, and a quoted field that never closes, instead of failing |
 | `WithTrimLeadingSpace(bool)` | `true` | drop white space at the start of a field |
 | `WithTrimValues(bool)` | `true` | `TrimSpace` every value |
 | `WithHeaderRow(n uint)` | `1` | which row holds the header; rows above it are dropped |
