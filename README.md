@@ -260,6 +260,10 @@ the struct itself.
 | `Line()` | the 1-based **physical** line of the file the current row starts on |
 | `Rows()` | how many rows have been handed out |
 
+`Copy` forwards `Line()` and `Record()` to whatever it wraps, so a source can go straight into
+`NewCopy` without keeping a second reference to it just to ask where a failure came from. A source
+with no lines — over an API, or a generator — answers `0` and `nil`.
+
 `Unused()` is worth logging as a warning: when an export renames a column, the tag simply matches
 nothing, no error is raised, and the wrong data reaches the database. The unbound column is the only
 visible trace.

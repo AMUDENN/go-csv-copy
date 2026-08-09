@@ -9,6 +9,13 @@ below `v1.0.0` the API may still move.
 
 ### Added
 
+- **`Copy.Line()` and `Copy.Record()`**, forwarded to the wrapped source when it can answer and
+  `0` / `nil` when it cannot. The documented recovery for a failed `CopyFrom` is to read the
+  source's error first, because that is the one naming the line — but the obvious code passes the
+  source straight into `NewCopy` and keeps no other reference to it, so there was nothing left to
+  ask. Queried through an inline interface assertion rather than by widening `RowSource`, so a
+  source over an API or a generator does not have to declare methods it cannot implement.
+
 - **`ValidateColumns` and `ErrInvalidColumns`**, for the header names a staging table is built
   from.
 

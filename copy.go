@@ -97,3 +97,34 @@ func (c *Copy[T]) Err() error {
 func (c *Copy[T]) Rows() int64 {
 	return c.rows
 }
+
+/*
+Line is the line of the file the current row came from, or zero when the source
+does not have lines - one over an API or a generator does not.
+
+Asked of the source through an interface rather than required by RowSource, so a
+source that cannot answer does not have to declare a method returning nothing
+useful.
+
+It exists because the advice for a failed CopyFrom is to read the source's error
+first, since that is the one naming the line. Without this, following that advice
+meant keeping the Typed value in a second variable purely to ask it - and the
+obvious code, which passes the source straight into NewCopy, could not.
+*/
+func (c *Copy[T]) Line() int {
+	if source, ok := c.src.(interface{ Line() int }); ok {
+		return source.Line()
+	}
+
+	return 0
+}
+
+// Record is the raw record behind the current row, or nil when the source does not
+// keep one. The counterpart to Line, and asked for the same way.
+func (c *Copy[T]) Record() []string {
+	if source, ok := c.src.(interface{ Record() []string }); ok {
+		return source.Record()
+	}
+
+	return nil
+}
