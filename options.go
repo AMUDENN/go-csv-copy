@@ -138,8 +138,20 @@ func WithHeaderRow(row uint) Option {
 	return func(s *settings) { s.headerRow = int(min(row, headerRowLimit)) }
 }
 
-// WithNormalizeHeader replaces the header normalizer. Passing nil restores
-// identity. Defaults to NormalizeSpace.
+/*
+WithNormalizeHeader replaces the header normalizer. Passing nil restores identity.
+Defaults to NormalizeSpace.
+
+It runs on both sides of the match: on every column name read from the file, and on
+every csv tag value read from a struct. That is what keeps a normalizer like
+strings.ToLower working - lowering only the file's names would stop them matching
+tags written in any other case.
+
+So it has to be pure and idempotent. It is called once per column and once per
+tagged field when a plan is built, never on the row path, and a function that
+returns different answers for the same input turns column matching into a
+coin toss.
+*/
 func WithNormalizeHeader(fn func(string) string) Option {
 	return func(s *settings) { s.normalizeHeader = fn }
 }

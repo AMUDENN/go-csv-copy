@@ -218,7 +218,7 @@ type RowSource[T any] interface {
 | `WithTrimLeadingSpace(bool)` | `true` | drop white space at the start of a field |
 | `WithTrimValues(bool)` | `true` | `TrimSpace` every value |
 | `WithHeaderRow(n uint)` | `1` | which row holds the header; rows above it are dropped |
-| `WithNormalizeHeader(fn)` | collapse whitespace | normalize a column name before matching |
+| `WithNormalizeHeader(fn)` | collapse whitespace | normalize a name before matching — applied to **both** the file's column names and the `csv` tag values, so it must be pure and idempotent |
 | `WithTag(string)` | `"csv"` | which struct tag `Typed` reads column names from |
 | `WithVariableColumns(bool)` | `false` | accept rows of a different width: extra values dropped, missing trailing ones → `nil` in `Raw`, `""` in `Typed` |
 | `WithAllowMissingColumns(bool)` | `false` | do not fail when a tagged column is absent from the header |
