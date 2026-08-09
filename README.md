@@ -220,7 +220,7 @@ type RowSource[T any] interface {
 | `WithHeaderRow(n uint)` | `1` | which row holds the header; rows above it are dropped |
 | `WithNormalizeHeader(fn)` | collapse whitespace | normalize a column name before matching |
 | `WithTag(string)` | `"csv"` | which struct tag `Typed` reads column names from |
-| `WithVariableColumns(bool)` | `false` | accept rows of a different width: missing trailing values → `nil`, extra ones dropped |
+| `WithVariableColumns(bool)` | `false` | accept rows of a different width: extra values dropped, missing trailing ones → `nil` in `Raw`, `""` in `Typed` |
 | `WithAllowMissingColumns(bool)` | `false` | do not fail when a tagged column is absent from the header |
 | `WithPointerValues(bool)` | `false` | `Raw` yields `*string` instead of `string`, removing one allocation per cell |
 | `WithMaxRecordBytes(int64)` | `64 MiB` | cap on one record; zero removes it. Exceeding it is `ErrRecordTooLarge` |
@@ -264,6 +264,26 @@ the struct itself.
 `Copy` forwards `Line()` and `Record()` to whatever it wraps, so a source can go straight into
 `NewCopy` without keeping a second reference to it just to ask where a failure came from. A source
 with no lines — over an API, or a generator — answers `0` and `nil`.
+
+### `nil` in `Raw`, `""` in `Typed`
+
+Under `WithVariableColumns`, a value the record never reached becomes SQL `NULL` in `Raw` and the
+empty string in `Typed`. The asymmetry is forced, not chosen: `Raw` hands pgx an `[]any` and can put
+`nil` in it, while a tagged field is declared `string` and has no `nil` to hold. In Postgres `NULL`
+and `''` are different values, so the difference matters.
+
+`Typed.Truncated()` tells the two cases apart, read after `Next()`:
+
+```go
+for source.Next() {
+    if source.Truncated() {
+        log.Warn("short record", "line", source.Line())
+    }
+}
+```
+
+`convert` cannot see it — it is called inside `Next()` with the struct as its only argument, and
+widening that signature would change every caller's code. Reject a short row in the loop instead.
 
 `Unused()` is worth logging as a warning: when an export renames a column, the tag simply matches
 nothing, no error is raised, and the wrong data reaches the database. The unbound column is the only

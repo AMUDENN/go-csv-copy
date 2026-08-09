@@ -158,7 +158,13 @@ func WithTag(tag string) Option {
 
 /*
 WithVariableColumns accepts rows whose field count differs from the header's.
-Missing trailing values become NULL and extra ones are dropped.
+Extra values are dropped; missing trailing ones become NULL in Raw and "" in Typed.
+
+That difference is real, not a wording slip. Raw hands pgx an []any and can put nil
+there, which is SQL NULL. A tagged field in Typed is declared string, so there is no
+nil to assign and an absent value is indistinguishable from an empty one - and in
+Postgres a NULL and an empty string are different values. Typed.Truncated reports
+which case the current row is, since convert cannot see it.
 
 Off by default: a row that is the wrong width usually means the delimiter or the
 quoting is misread, and failing beats loading shifted data.

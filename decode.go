@@ -182,23 +182,35 @@ func buildPlan[S any](header []string, set settings) (decodePlan, []string, erro
 }
 
 /*
-apply copies one record into the struct.
+apply copies one record into the struct, reporting whether the record ran out
+before a bound column.
 
 Every bound field is assigned on every row, so none of them survives from the
 previous one. A record that stops short of a bound column leaves that field empty
-rather than stale, which matters because the struct is reused across the whole
-file.
+rather than stale, which matters because the struct is reused across the whole file.
+
+This is where Typed and Raw genuinely differ, and the difference is not cosmetic.
+Raw deals in []any and can put a nil there, so a column the record never reached
+becomes SQL NULL. A field here is declared string; there is no nil to assign, so it
+becomes "". In Postgres a NULL and an empty string are different values, and only
+convert could tell the two cases apart - which is what the returned bool is for.
 
 Fields no column bound to are not touched at all - neither the untagged ones nor
 those tagged "-". The struct is the caller's to use as scratch space between rows,
 and zeroing it here would take that away without asking.
 */
-func (p decodePlan) apply(record []string, dst reflect.Value) {
+func (p decodePlan) apply(record []string, dst reflect.Value) bool {
+	truncated := false
+
 	for _, b := range p {
 		if b.column < len(record) {
 			dst.Field(b.field).SetString(record[b.column])
+
 			continue
 		}
 		dst.Field(b.field).SetString("")
+		truncated = true
 	}
+
+	return truncated
 }

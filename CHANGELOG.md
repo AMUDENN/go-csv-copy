@@ -9,6 +9,17 @@ below `v1.0.0` the API may still move.
 
 ### Added
 
+- **`Typed.Truncated()`**, reporting whether the current record ran out before a bound column.
+
+  The README claimed `WithVariableColumns` turned missing trailing values into `nil`. True for
+  `Raw`, which hands pgx an `[]any`; false for `Typed`, where a tagged field is declared `string`,
+  has no `nil` to hold, and gets `""`. In Postgres a NULL and an empty string are different values,
+  so the documentation was wrong about something that changes what lands in the database. Both the
+  README and the option's godoc now state the asymmetry and why it is forced rather than chosen.
+
+  `convert` cannot see the flag: it is called inside `Next` with the struct as its only argument,
+  and widening that signature would change every caller's code. Read it in the loop instead.
+
 - **`WithComment`**, forwarding `csv.Reader.Comment`. `WithHeaderRow` drops a fixed number of lines
   at the top, which does not help with notes scattered through a file. Validated like the
   delimiter — a comment rune equal to it, or one `encoding/csv` will not accept, is `ErrSchema`
