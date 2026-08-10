@@ -160,6 +160,76 @@ func TestPointerValuesLoadIdentically(t *testing.T) {
 }
 
 /*
+The other half of the pointer question: a typed destination.
+
+The digest test above loads into an all-TEXT staging table, which is what Raw is
+built for - but nothing stops a caller pointing it at a real schema, and there pgx
+has to turn a *string into a bigint, a numeric and a date. Whether it will is the
+thing that decides if this option can be the default rather than an opt-in.
+*/
+func TestPointerValuesIntoTypedColumns(t *testing.T) {
+	conn := connect(t)
+	ctx := context.Background()
+
+	load := func(pointers bool) error {
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() {
+			if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+				t.Logf("rollback: %v", err)
+			}
+		}()
+
+		_, err = tx.Exec(ctx, `
+			CREATE TEMP TABLE pointer_typed (
+				id BIGINT PRIMARY KEY,
+				balance NUMERIC(12,2) NOT NULL,
+				joined DATE NOT NULL
+			) ON COMMIT DROP
+		`)
+		if err != nil {
+			t.Fatalf("create table: %v", err)
+		}
+
+		const file = "id;balance;joined\n1;10.50;2024-01-31\n2;0.00;2024-02-01\n"
+
+		src, err := csvcopy.NewRaw(strings.NewReader(file), csvcopy.WithPointerValues(pointers))
+		if err != nil {
+			t.Fatalf("NewRaw: %v", err)
+		}
+
+		if _, err = tx.CopyFrom(ctx, pgx.Identifier{"pointer_typed"}, src.Columns(), src); err != nil {
+			return err
+		}
+		if srcErr := src.Err(); srcErr != nil {
+			t.Fatalf("source: %v", srcErr)
+		}
+
+		var total float64
+		if err = tx.QueryRow(ctx, `SELECT sum(balance) FROM pointer_typed`).Scan(&total); err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		if total != 10.5 {
+			t.Errorf("pointers=%v: sum(balance) = %v, want 10.5", pointers, total)
+		}
+
+		return nil
+	}
+
+	if err := load(false); err != nil {
+		t.Fatalf("plain strings into typed columns failed: %v", err)
+	}
+
+	// Reported rather than asserted: if pgx will not do this, the option stays
+	// opt-in and the godoc says so, which is a result either way.
+	if err := load(true); err != nil {
+		t.Errorf("pointer values into typed columns failed: %v", err)
+	}
+}
+
+/*
 A short record has to arrive as NULL, not as an empty string.
 
 This is the guarantee Raw's padding exists for, and in Postgres the two are
