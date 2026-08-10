@@ -18,11 +18,14 @@ reader was constructed with. Defaults matter here: several behaviours change wit
 
 | Version | Supported |
 |---|---|
-| latest `0.x` | yes |
-| older `0.x` | no — upgrade |
+| latest `1.x` | yes |
+| older `1.x` | no — upgrade |
+| `0.x` | no — upgrade to `1.x` |
 
-Before `v1.0.0` there is one supported version: the latest tag. Fixes go there, not into older
-tags.
+There is one supported version: the latest `1.x` tag. Fixes go there, not into older tags — the
+exported API is frozen for the whole `1.x` line, so upgrading to it is a version bump and nothing
+else. A fix that could not be made without breaking that promise would go into a `v2` with its own
+import path, and the advisory would say so.
 
 ## What counts as a vulnerability here
 
@@ -59,7 +62,13 @@ someone else's code, but the invitation would be ours.
 - Options that loosen a default when the caller asks. `WithLazyQuotes(true)` accepting damaged
   quoting, `WithAllowMissingColumns(true)` letting a bound field read as empty, and
   `WithMaxRecordBytes(0)` removing the cap are all documented, and each godoc says what it costs.
+  A *negative* cap is not one of these: it is `csvcopy.ErrSchema` from the constructor, because it
+  reaches the option as arithmetic gone wrong far more often than as a request, and reading it as
+  "remove the cap" would turn a config slip into an unbounded read.
 - SQL injection through a value rather than an identifier. Values reach the database through
   `pgx.CopyFrom`, which does not interpolate them into a statement.
 - Anything requiring the caller to pass a struct they did not write. A `csv` tag is code, and code
   is trusted; that is `ErrSchema` territory, not a boundary.
+- A panic from your own `convert`. It is not caught, deliberately: `convert` is the caller's code,
+  running on the caller's goroutine, and swallowing a panic raised there would hide a bug in it
+  behind a CSV error. Recover in `convert` if a panic is a possibility you want to survive.

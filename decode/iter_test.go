@@ -1,13 +1,17 @@
-package csvcopy
+package decode
 
 import (
 	"errors"
 	"reflect"
 	"strings"
 	"testing"
+
+	csvcopy "github.com/AMUDENN/go-csv-copy"
 )
 
 func TestReaderAll(t *testing.T) {
+	t.Parallel()
+
 	reader, err := NewReader(strings.NewReader("a;b\n1;2\n3;4\n"))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -30,6 +34,8 @@ func TestReaderAll(t *testing.T) {
 // Ranging cannot carry an error out, so the loop has to stop and Err has to hold
 // the reason. Without that the caller silently processes a truncated file.
 func TestReaderAllStopsOnErrorAndReportsIt(t *testing.T) {
+	t.Parallel()
+
 	reader, err := NewReader(strings.NewReader("a;b;c\n1;2;3\n4;5\n6;7;8\n"))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -45,8 +51,8 @@ func TestReaderAllStopsOnErrorAndReportsIt(t *testing.T) {
 	}
 
 	err = reader.Err()
-	if !errors.Is(err, ErrParse) {
-		t.Fatalf("Err() = %v, want an error wrapping ErrParse", err)
+	if !errors.Is(err, csvcopy.ErrParse) {
+		t.Fatalf("Err() = %v, want an error wrapping csvcopy.ErrParse", err)
 	}
 	if !strings.Contains(err.Error(), "line 3") {
 		t.Errorf("Err() = %q, does not name line 3", err)
@@ -54,6 +60,8 @@ func TestReaderAllStopsOnErrorAndReportsIt(t *testing.T) {
 }
 
 func TestReaderAllEmptyFile(t *testing.T) {
+	t.Parallel()
+
 	reader, err := NewReader(strings.NewReader(""))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -70,6 +78,8 @@ func TestReaderAllEmptyFile(t *testing.T) {
 // Breaking out early must not leave the source wedged: whatever the loop did, the
 // next pull still behaves.
 func TestReaderAllBreakEarly(t *testing.T) {
+	t.Parallel()
+
 	reader, err := NewReader(strings.NewReader("a\n1\n2\n3\n"))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -96,6 +106,8 @@ func TestReaderAllBreakEarly(t *testing.T) {
 }
 
 func TestRawAll(t *testing.T) {
+	t.Parallel()
+
 	src, err := NewRaw(strings.NewReader("a;b\n1;2\n3;4\n"))
 	if err != nil {
 		t.Fatalf("NewRaw: %v", err)
@@ -119,6 +131,8 @@ func TestRawAll(t *testing.T) {
 }
 
 func TestRawAllStopsOnError(t *testing.T) {
+	t.Parallel()
+
 	src, err := NewRaw(strings.NewReader("a;b;c\n1;2;3\n4;5\n"))
 	if err != nil {
 		t.Fatalf("NewRaw: %v", err)
@@ -132,12 +146,14 @@ func TestRawAllStopsOnError(t *testing.T) {
 	if count != 1 {
 		t.Errorf("iterated %d rows before the error, want 1", count)
 	}
-	if err = src.Err(); !errors.Is(err, ErrParse) {
-		t.Fatalf("Err() = %v, want an error wrapping ErrParse", err)
+	if err = src.Err(); !errors.Is(err, csvcopy.ErrParse) {
+		t.Fatalf("Err() = %v, want an error wrapping csvcopy.ErrParse", err)
 	}
 }
 
 func TestRawAllBreakEarly(t *testing.T) {
+	t.Parallel()
+
 	src, err := NewRaw(strings.NewReader("a;b\n1;2\n3;4\n5;6\n"))
 	if err != nil {
 		t.Fatalf("NewRaw: %v", err)
@@ -171,6 +187,8 @@ func TestRawAllBreakEarly(t *testing.T) {
 }
 
 func TestTypedAll(t *testing.T) {
+	t.Parallel()
+
 	src, err := NewTyped(strings.NewReader("id;name\n1;Alice\n2;Bob\n"), toEntity)
 	if err != nil {
 		t.Fatalf("NewTyped: %v", err)
@@ -191,6 +209,8 @@ func TestTypedAll(t *testing.T) {
 }
 
 func TestTypedAllStopsOnConvertError(t *testing.T) {
+	t.Parallel()
+
 	src, err := NewTyped(strings.NewReader("id;name\n1;Alice\n;Bob\n3;Carol\n"), toEntity)
 	if err != nil {
 		t.Fatalf("NewTyped: %v", err)
@@ -206,8 +226,8 @@ func TestTypedAllStopsOnConvertError(t *testing.T) {
 	}
 
 	err = src.Err()
-	if !errors.Is(err, ErrParse) {
-		t.Fatalf("Err() = %v, want an error wrapping ErrParse", err)
+	if !errors.Is(err, csvcopy.ErrParse) {
+		t.Fatalf("Err() = %v, want an error wrapping csvcopy.ErrParse", err)
 	}
 	if !strings.Contains(err.Error(), "line 3") {
 		t.Errorf("Err() = %q, does not name line 3", err)
@@ -215,6 +235,8 @@ func TestTypedAllStopsOnConvertError(t *testing.T) {
 }
 
 func TestTypedAllBreakEarly(t *testing.T) {
+	t.Parallel()
+
 	src, err := NewTyped(strings.NewReader("id;name\n1;Alice\n2;Bob\n3;Carol\n"), toEntity)
 	if err != nil {
 		t.Fatalf("NewTyped: %v", err)
@@ -244,6 +266,8 @@ after the loop stays valid. This is the property that makes the typed layer usab
 with no database at all.
 */
 func TestTypedAllValuesSurviveTheLoop(t *testing.T) {
+	t.Parallel()
+
 	src, err := NewTyped(
 		strings.NewReader("id;name\n1;Alice\n2;Bob\n"),
 		func(p *person) (person, error) { return *p, nil },

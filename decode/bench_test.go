@@ -1,8 +1,9 @@
-package csvcopy
+package decode
 
 import (
 	"bytes"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -12,20 +13,23 @@ Memory has to stay flat as rows go by - that is the reason this package exists
 rather than a ReadAll into a slice. These benchmarks exist to make a regression
 visible.
 
-Measured on go1.26.1 windows/amd64, one run at -benchtime=3x, 100k rows of 5
-columns:
+Measured on go1.26.1 darwin/arm64 (Apple M1), median of -count=6 at -benchtime=3x,
+100k rows of 5 columns:
 
-	BenchmarkRaw-6                12.6 ms    3.2 MB   100034 allocs   (1 per row)
-	BenchmarkRawAll-6             12.5 ms    3.2 MB   100034 allocs   (1 per row)
-	BenchmarkRawStringValues-6    22.1 ms   11.2 MB   600033 allocs   (6 per row)
-	BenchmarkTyped-6              14.6 ms    3.2 MB   100039 allocs   (1 per row)
-	BenchmarkTypedAll-6           15.0 ms    3.2 MB   100039 allocs   (1 per row)
-	BenchmarkTypedCopy-6          23.6 ms   11.2 MB   600041 allocs   (6 per row)
-	BenchmarkNewTyped-6            3.7 us    6.1 kB       39 allocs   (per file)
+	BenchmarkRaw-8                14.7 ms    3.2 MB   100034 allocs   (1 per row)
+	BenchmarkRawAll-8             14.5 ms    3.2 MB   100034 allocs   (1 per row)
+	BenchmarkRawStringValues-8    22.1 ms   11.2 MB   600033 allocs   (6 per row)
+	BenchmarkTyped-8              14.3 ms    3.2 MB   100040 allocs   (1 per row)
+	BenchmarkTypedAll-8           14.3 ms    3.2 MB   100040 allocs   (1 per row)
+	BenchmarkNewTyped-8            5.2 us    6.2 kB       40 allocs   (per file)
 
-Three runs is far too few to say anything about ns/op - treat those as an order
-of magnitude and compare allocs/op, which is stable to the allocation. The point
-of -benchtime=3x is that each iteration walks 100k rows already.
+Three iterations is far too few to say anything about ns/op from a single run -
+compare allocs/op, which is stable to the allocation, and treat the times as an
+order of magnitude unless -count is high enough for benchstat to have an opinion.
+The point of -benchtime=3x is that each iteration walks 100k rows already.
+
+BenchmarkDecodePlanApply is the exception and must be run at the default
+-benchtime: three iterations of a nine-nanosecond function measure nothing.
 
 Live-memory is constant; these are allocations over the whole pass, and the
 per-row counts are accounted for:
@@ -52,29 +56,29 @@ do, and those cost an integer subtraction.
 
 On a wide file the boxing is the whole story. 20k rows of 30 columns:
 
-	BenchmarkTypedWide-6              15.7 ms    5.3 MB    20099 allocs   (1 per row)
-	BenchmarkRawWide-6                13.2 ms    5.3 MB    20066 allocs   (1 per row)
-	BenchmarkRawWideStringValues-6    21.8 ms   14.9 MB   620065 allocs  (31 per row)
+	BenchmarkTypedWide-8              15.1 ms    5.3 MB    20100 allocs   (1 per row)
+	BenchmarkRawWide-8                15.2 ms    5.3 MB    20067 allocs   (1 per row)
+	BenchmarkRawWideStringValues-8    23.6 ms   14.9 MB   620065 allocs  (31 per row)
 
 Six times the columns, thirty-one times the allocations once the values are strings,
 while both the default and Typed stay flat at one per row - apply is linear in bound
-fields but writes into a struct and allocates nothing. Which is the argument for the
-default: what it saves grows with the width of the file, 31x here against 6x on five
-columns, and it makes Raw the fastest of the three.
+fields but writes through pointers and allocates nothing. Which is the argument for
+the default: what it saves grows with the width of the file, 31x here against 6x on
+five columns.
 
-And the mistake that undoes it, against BenchmarkTypedCopy on the same file:
+Typed sits level with Raw on both widths, which it did not before the plan resolved
+to field pointers: apply used to reach for reflect.Value.Field on every field of
+every row, and that was the whole of the gap.
 
-	BenchmarkTypedCopy-6      23.6 ms   11.2 MB   600041 allocs   (6 per row)
-	BenchmarkCopyBadEncode-6  26.4 ms   19.2 MB   700042 allocs   (7 per row)
-
-One extra allocation per row and 8 MB more, for an encode that returns a fresh
-slice instead of appending into dst. It reads perfectly naturally and nothing stops
-you writing it.
+What the layout on top of this costs - BenchmarkTypedCopy - and the encode mistake
+that makes it worse are in copyfrom, which is where Copy is. They run on a file
+generated identically, so they compare directly against BenchmarkTyped here.
 
 Watch for: allocs/op climbing above (columns + 1) per row, an All benchmark
 drifting away from its Next counterpart, or any growth in BenchmarkNewTyped,
 which is pure per-file setup and the only place a new check on the struct can
-show up. Its 39 allocations are reflect and the plan, paid once per file.
+show up. Its 40 allocations are reflect, the bindings and the bound plan, paid once
+per file.
 */
 const benchRows = 100_000
 
@@ -95,7 +99,7 @@ func BenchmarkRaw(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for b.Loop() {
+	for range b.N {
 		src, err := NewRaw(bytes.NewReader(file))
 		if err != nil {
 			b.Fatal(err)
@@ -132,7 +136,7 @@ func BenchmarkTyped(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for b.Loop() {
+	for range b.N {
 		src, err := NewTyped(bytes.NewReader(file), benchConvert)
 		if err != nil {
 			b.Fatal(err)
@@ -149,36 +153,6 @@ func BenchmarkTyped(b *testing.B) {
 	}
 }
 
-func BenchmarkTypedCopy(b *testing.B) {
-	file := benchFile(benchRows)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for b.Loop() {
-		rows, err := NewTyped(bytes.NewReader(file), benchConvert)
-		if err != nil {
-			b.Fatal(err)
-		}
-
-		source, err := NewCopy(rows, 5, func(dst []any, r benchRow) []any {
-			return append(dst, r.ID, r.LastName, r.FirstName, r.Birthdate, r.AddressID)
-		})
-		if err != nil {
-			b.Fatal(err)
-		}
-
-		for source.Next() {
-			if _, err = source.Values(); err != nil {
-				b.Fatal(err)
-			}
-		}
-		if err = source.Err(); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
 // The counterpart to BenchmarkRaw, which now uses pointer values by default: this
 // is what asking for plain strings costs instead, one allocation per cell.
 func BenchmarkRawStringValues(b *testing.B) {
@@ -187,7 +161,7 @@ func BenchmarkRawStringValues(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for b.Loop() {
+	for range b.N {
 		src, err := NewRaw(bytes.NewReader(file), WithPointerValues(false))
 		if err != nil {
 			b.Fatal(err)
@@ -220,7 +194,7 @@ func BenchmarkRawAll(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for b.Loop() {
+	for range b.N {
 		src, err := NewRaw(bytes.NewReader(file))
 		if err != nil {
 			b.Fatal(err)
@@ -243,7 +217,7 @@ func BenchmarkTypedAll(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for b.Loop() {
+	for range b.N {
 		src, err := NewTyped(bytes.NewReader(file), benchConvert)
 		if err != nil {
 			b.Fatal(err)
@@ -263,9 +237,10 @@ func BenchmarkTypedAll(b *testing.B) {
 func BenchmarkNewTyped(b *testing.B) {
 	header := "id;last_name;first_name;birthdate;address_id\n"
 
+	b.ResetTimer()
 	b.ReportAllocs()
 
-	for b.Loop() {
+	for range b.N {
 		if _, err := NewTyped(strings.NewReader(header), benchConvert); err != nil {
 			b.Fatal(err)
 		}
@@ -350,7 +325,7 @@ func BenchmarkTypedWide(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for b.Loop() {
+	for range b.N {
 		src, err := NewTyped(bytes.NewReader(file), benchWideConvert)
 		if err != nil {
 			b.Fatal(err)
@@ -375,7 +350,7 @@ func BenchmarkRawWide(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for b.Loop() {
+	for range b.N {
 		src, err := NewRaw(bytes.NewReader(file))
 		if err != nil {
 			b.Fatal(err)
@@ -399,7 +374,7 @@ func BenchmarkRawWideStringValues(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for b.Loop() {
+	for range b.N {
 		src, err := NewRaw(bytes.NewReader(file), WithPointerValues(false))
 		if err != nil {
 			b.Fatal(err)
@@ -416,39 +391,67 @@ func BenchmarkRawWideStringValues(b *testing.B) {
 }
 
 /*
-BenchmarkCopyBadEncode prices the mistake the encode contract exists to prevent.
+BenchmarkDecodePlanApply is the row path of Typed on its own, with the reader and
+convert taken out of the picture.
 
-encode is handed dst and is meant to append into it. Returning a fresh slice
-instead - which reads perfectly naturally, and which nothing stops you from doing -
-throws away the one buffer Copy keeps and allocates a slice per row on top of the
-boxing. Against BenchmarkTypedCopy, the difference is the documentation.
+It exists because apply is where the one interesting decision in this package's
+hot loop lives: the plan resolves the struct's field addresses once per file, so a
+row is a walk over pointers rather than reflect.Value.Field followed by SetString.
+End-to-end numbers bury that under encoding/csv, which allocates a string per
+record and dominates everything; here it is the only thing being measured, and a
+regression shows up as a multiple rather than as a few percent.
+
+Ten fields, all bound, no allocation on any path.
 */
-func BenchmarkCopyBadEncode(b *testing.B) {
-	file := benchFile(benchRows)
+func BenchmarkDecodePlanApply(b *testing.B) {
+	var row struct {
+		C0 string `csv:"c0"`
+		C1 string `csv:"c1"`
+		C2 string `csv:"c2"`
+		C3 string `csv:"c3"`
+		C4 string `csv:"c4"`
+		C5 string `csv:"c5"`
+		C6 string `csv:"c6"`
+		C7 string `csv:"c7"`
+		C8 string `csv:"c8"`
+		C9 string `csv:"c9"`
+	}
+
+	bindings := make([]binding, 10)
+	record := make([]string, 10)
+	for i := range bindings {
+		bindings[i] = binding{field: i, column: i}
+		record[i] = "value"
+	}
+
+	plan := bindPlan(bindings, reflect.ValueOf(&row).Elem())
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for b.Loop() {
-		rows, err := NewTyped(bytes.NewReader(file), benchConvert)
-		if err != nil {
-			b.Fatal(err)
+	for range b.N {
+		if plan.apply(record) {
+			b.Fatal("apply reported a truncated record on a full one")
 		}
+	}
+}
 
-		source, err := NewCopy(rows, 5, func(_ []any, r benchRow) []any {
-			// The mistake: dst is ignored and a new slice is returned.
-			return []any{r.ID, r.LastName, r.FirstName, r.Birthdate, r.AddressID}
-		})
-		if err != nil {
-			b.Fatal(err)
-		}
+/*
+NewReader is per-file setup: the option checks, the BOM read and the header.
 
-		for source.Next() {
-			if _, err = source.Values(); err != nil {
-				b.Fatal(err)
-			}
-		}
-		if err = source.Err(); err != nil {
+BenchmarkNewTyped covers the same ground plus the struct work, so this one exists
+to say which half a change landed in. A new validation in the constructor is
+cheap by definition here - the point of watching it is that per-file work is where
+a "cheap" check can quietly become a per-file allocation.
+*/
+func BenchmarkNewReader(b *testing.B) {
+	header := "id;last_name;first_name;birthdate;address_id\n"
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for range b.N {
+		if _, err := NewReader(strings.NewReader(header)); err != nil {
 			b.Fatal(err)
 		}
 	}

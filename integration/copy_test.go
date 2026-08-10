@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	csvcopy "github.com/AMUDENN/go-csv-copy"
+	"github.com/AMUDENN/go-csv-copy/copyfrom"
+	"github.com/AMUDENN/go-csv-copy/decode"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -118,7 +120,7 @@ func TestPointerValuesLoadIdentically(t *testing.T) {
 			}
 		}()
 
-		src, err := csvcopy.NewRaw(strings.NewReader(sampleFile), csvcopy.WithPointerValues(pointers))
+		src, err := decode.NewRaw(strings.NewReader(sampleFile), decode.WithPointerValues(pointers))
 		if err != nil {
 			t.Fatalf("NewRaw: %v", err)
 		}
@@ -195,7 +197,7 @@ func TestPointerValuesIntoTypedColumns(t *testing.T) {
 
 		const file = "id;balance;joined\n1;10.50;2024-01-31\n2;0.00;2024-02-01\n"
 
-		src, err := csvcopy.NewRaw(strings.NewReader(file), csvcopy.WithPointerValues(pointers))
+		src, err := decode.NewRaw(strings.NewReader(file), decode.WithPointerValues(pointers))
 		if err != nil {
 			t.Fatalf("NewRaw: %v", err)
 		}
@@ -244,7 +246,7 @@ func TestShortRecordLandsAsNull(t *testing.T) {
 	// Row 2 stops after two fields; row 3 has an explicit empty third field.
 	const file = "id;name;note\n1;Alice;first\n2;Bob\n3;Carol;\n"
 
-	src, err := csvcopy.NewRaw(strings.NewReader(file), csvcopy.WithVariableColumns(true))
+	src, err := decode.NewRaw(strings.NewReader(file), decode.WithVariableColumns(true))
 	if err != nil {
 		t.Fatalf("NewRaw: %v", err)
 	}
@@ -308,14 +310,14 @@ func TestTypedCopyIntoTypedColumns(t *testing.T) {
 
 	const file = "id;balance;joined\n1;10.50;2024-01-31\n2;0.00;2024-02-01\n"
 
-	rows, err := csvcopy.NewTyped(strings.NewReader(file), (*clientRow).toClient)
+	rows, err := decode.NewTyped(strings.NewReader(file), (*clientRow).toClient)
 	if err != nil {
 		t.Fatalf("NewTyped: %v", err)
 	}
 
 	columns := []string{"id", "balance", "joined"}
 
-	source, err := csvcopy.NewCopy(rows, len(columns), func(dst []any, c *client) []any {
+	source, err := copyfrom.NewCopy(rows, len(columns), func(dst []any, c *client) []any {
 		return append(dst, c.id, c.balance, c.joined)
 	})
 	if err != nil {
@@ -371,7 +373,7 @@ func TestFailureMidFileLeavesNothing(t *testing.T) {
 	// Row 3 is short, which is an error without WithVariableColumns.
 	const file = "id;name;note\n1;Alice;first\n2;Bob;second\n3;Carol\n4;Dave;fourth\n"
 
-	src, err := csvcopy.NewRaw(strings.NewReader(file))
+	src, err := decode.NewRaw(strings.NewReader(file))
 	if err != nil {
 		t.Fatalf("NewRaw: %v", err)
 	}
@@ -417,7 +419,7 @@ func TestEmptyFileNeverReachesTheDatabase(t *testing.T) {
 	conn := connect(t)
 	tx := begin(t, conn)
 
-	src, err := csvcopy.NewRaw(strings.NewReader(""))
+	src, err := decode.NewRaw(strings.NewReader(""))
 	if err != nil {
 		t.Fatalf("NewRaw: %v", err)
 	}

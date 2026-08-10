@@ -1,4 +1,4 @@
-package csvcopy
+package decode
 
 import "strings"
 
@@ -69,9 +69,9 @@ func NormalizeSpace(s string) string {
 /*
 WithComma sets the field delimiter. Defaults to ';'.
 
-A quote, a carriage return, a newline and an invalid rune cannot delimit anything
-encoding/csv is willing to read, so the constructor rejects them with ErrSchema
-rather than letting the first row fail with ErrParse.
+A quote, a carriage return, a newline and an invalid rune cannot delimit
+anything encoding/csv is willing to read, so the constructor rejects them with
+csvcopy.ErrSchema rather than letting the first row fail with csvcopy.ErrParse.
 */
 func WithComma(comma rune) Option {
 	return func(s *settings) { s.comma = comma }
@@ -85,10 +85,11 @@ A line whose first rune is this one is skipped entirely, wherever it appears -
 which is what WithHeaderRow cannot do, since that only drops a fixed number of
 lines at the top.
 
-Validated like the delimiter, and for the same reason: a comment rune equal to the
-delimiter, or one encoding/csv will not accept, is ErrSchema from the constructor
-rather than ErrParse on the first row. Skipped lines do not shift the line numbers
-in errors - those come from encoding/csv, which counts the physical file.
+Validated like the delimiter, and for the same reason: a comment rune equal to
+the delimiter, or one encoding/csv will not accept, is csvcopy.ErrSchema from
+the constructor rather than csvcopy.ErrParse on the first row. Skipped lines do
+not shift the line numbers in errors - those come from encoding/csv, which
+counts the physical file.
 */
 func WithComment(comment rune) Option {
 	return func(s *settings) { s.comment = comment }
@@ -116,7 +117,19 @@ func WithTrimLeadingSpace(trim bool) Option {
 	return func(s *settings) { s.trimLeadingSpace = trim }
 }
 
-// WithTrimValues applies strings.TrimSpace to every value. Defaults to true.
+/*
+WithTrimValues applies strings.TrimSpace to every value. Defaults to true.
+
+It does not exempt quoted fields, and that is the one surprise in it. Quoting is
+how a CSV says "these spaces are data", so `"  x  "` arrives as "x" and a field of
+three deliberate spaces arrives as "" - which, in a column the caller treats as
+nullable, is a different value from what the file held.
+
+The default follows the target case: these files come out of spreadsheet exports
+where padding is alignment rather than content. Turn it off where the padding is
+data - a fixed-width export, a column of codes - and values come through byte for
+byte.
+*/
 func WithTrimValues(trim bool) Option {
 	return func(s *settings) { s.trimValues = trim }
 }
@@ -164,6 +177,12 @@ The whole tag is the column name. There are no comma-separated options - a field
 tagged `csv:"name,omitempty"` asks for a column literally called
 "name,omitempty", which no header will have. The only value with a meaning of its
 own is "-", which drops the field.
+
+An empty name is csvcopy.ErrSchema from the constructor:
+reflect.StructTag.Get("") answers "" for every field, so nothing would bind and
+every row would decode as empty. A struct with no field carrying this tag is
+csvcopy.ErrSchema too - the same failure, from the other side, and typically
+`json:"..."` where `csv:"..."` was meant.
 */
 func WithTag(tag string) Option {
 	return func(s *settings) { s.tag = tag }
@@ -215,16 +234,22 @@ into a table of bigint, numeric and date. Both pass.
 
 Pass false if you drive the source yourself and want plain strings - a type switch
 over []any is easier to write against string than *string. Nothing else in the
-package is affected: Typed decodes into your struct fields, and in Copy the boxing
-happens inside your own encode.
+package is affected: Typed decodes into your struct fields, and in copyfrom.Copy
+the boxing happens inside your own encode.
 */
 func WithPointerValues(pointers bool) Option {
 	return func(s *settings) { s.pointerValues = pointers }
 }
 
 /*
-WithMaxRecordBytes caps how large one record may be. Zero, or anything negative,
-removes the cap. Defaults to 64 MiB.
+WithMaxRecordBytes caps how large one record may be. Zero removes the cap.
+Defaults to 64 MiB.
+
+A negative value is csvcopy.ErrSchema from the constructor, not a second way of
+spelling zero. It is almost always arithmetic on a config gone wrong - a byte count
+computed from an unset field, a subtraction, an overflow - and reading that as
+"remove the only bound on this package's memory" is not a safe thing to do
+silently. Pass 0 to mean it.
 
 The cap is what makes "memory does not depend on the size of the file" true for
 input nobody checked. encoding/csv assembles a record in one buffer and has no
@@ -232,14 +257,30 @@ limit of its own, so a field that opens a quote and never closes it is read to t
 end of the file and the whole file becomes one value. Exceeding the cap is
 ErrRecordTooLarge.
 
-The bound is approximate: csv.Reader buffers ahead, so the accounting is off by up
-to one buffer. It is an upper bound on memory, not a byte count to assert against.
+The cap is on the record, not on the process: peak memory while one oversized
+record is being read is up to about 4x it - 263 MiB measured against the 64 MiB
+default. encoding/csv holds the physical line in one buffer and the assembled
+record in another, both grown by doubling, and a doubling has the old array and
+the new one live at the same time. Size the cap against the memory you can afford
+divided by four, not against the memory you can afford.
+
+The count itself is approximate too, in the other direction: csv.Reader buffers
+ahead, so bytes drawn from the input and bytes that ended up in the record differ
+by up to one buffer. It is a bound on memory, not a byte count to assert against.
+
+A small cap also caps the read sizes underneath it - a Read that would overrun the
+remaining budget is trimmed to what is left. Irrelevant at 64 MiB; at something
+like 64 KiB it means the reader below sees short reads, which is worth knowing if
+it is a network connection.
+
+The budget is per Read rather than per line, and encoding/csv skips blank lines and
+comment lines inside one - so a run of them longer than the cap is reported as
+ErrRecordTooLarge even though no single record is oversized. Since that error wraps
+csvcopy.ErrParse, a caller that quarantines files on ErrParse would quarantine a
+good one. Invisible at 64 MiB; worth knowing before tightening the cap on a file
+that carries comment blocks or long runs of blank lines. See budgetReader for why
+resetting the budget per line would be a worse trade than this is.
 */
 func WithMaxRecordBytes(n int64) Option {
-	return func(s *settings) {
-		if n < 0 {
-			n = 0
-		}
-		s.maxRecordBytes = n
-	}
+	return func(s *settings) { s.maxRecordBytes = n }
 }

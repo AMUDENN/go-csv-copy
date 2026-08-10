@@ -1,4 +1,4 @@
-package csvcopy
+package decode
 
 import (
 	"context"
@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	csvcopy "github.com/AMUDENN/go-csv-copy"
 )
 
 const bom = "\xEF\xBB\xBF"
@@ -86,6 +88,8 @@ func readUntilError(t *testing.T, r *Reader) [][]string {
 }
 
 func TestReaderHeader(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		input   string
@@ -197,6 +201,8 @@ func TestReaderHeader(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			reader, err := NewReader(strings.NewReader(test.input), test.opts...)
 			if err != nil {
 				t.Fatalf("NewReader: %v", err)
@@ -214,6 +220,8 @@ func TestReaderHeader(t *testing.T) {
 // A blank line above the header is skipped by encoding/csv, so counting the header
 // row cannot rely on physical lines.
 func TestReaderHeaderRowSkipsBlankLines(t *testing.T) {
+	t.Parallel()
+
 	reader, err := NewReader(strings.NewReader("title\na;b\n1;2\n"), WithHeaderRow(2))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -224,6 +232,8 @@ func TestReaderHeaderRowSkipsBlankLines(t *testing.T) {
 }
 
 func TestReaderStripsBOMFromSlowReader(t *testing.T) {
+	t.Parallel()
+
 	reader, err := NewReader(&trickleReader{data: []byte(bom + "id;name\n1;Alice\n")})
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -246,6 +256,8 @@ Every other fixture here is ASCII, where a byte-indexing bug is invisible, so th
 one carries the multibyte coverage on its own.
 */
 func TestReaderMultibyteValues(t *testing.T) {
+	t.Parallel()
+
 	reader, err := NewReader(strings.NewReader(bom + "\"café \n au lait\";日本語\n  naïve  ; Ünicode \n"))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -263,12 +275,16 @@ func TestReaderMultibyteValues(t *testing.T) {
 }
 
 func TestReaderNilReader(t *testing.T) {
-	if _, err := NewReader(nil); !errors.Is(err, ErrSchema) {
-		t.Fatalf("NewReader(nil) error = %v, want ErrSchema", err)
+	t.Parallel()
+
+	if _, err := NewReader(nil); !errors.Is(err, csvcopy.ErrSchema) {
+		t.Fatalf("NewReader(nil) error = %v, want csvcopy.ErrSchema", err)
 	}
 }
 
 func TestReaderFieldCountErrorNamesTheLine(t *testing.T) {
+	t.Parallel()
+
 	reader, err := NewReader(strings.NewReader("a;b;c\n1;2;3\n4;5\n"))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -281,8 +297,8 @@ func TestReaderFieldCountErrorNamesTheLine(t *testing.T) {
 	if err == nil {
 		t.Fatal("Read: expected an error for a short record")
 	}
-	if !errors.Is(err, ErrParse) {
-		t.Errorf("error %v does not wrap ErrParse", err)
+	if !errors.Is(err, csvcopy.ErrParse) {
+		t.Errorf("error %v does not wrap csvcopy.ErrParse", err)
 	}
 	if !strings.Contains(err.Error(), "line 3") {
 		t.Errorf("error %q does not name line 3", err)
@@ -290,6 +306,8 @@ func TestReaderFieldCountErrorNamesTheLine(t *testing.T) {
 }
 
 func TestReaderRecordAndLine(t *testing.T) {
+	t.Parallel()
+
 	reader, err := NewReader(strings.NewReader("a;b\n1;2\n3;4\n"))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -318,6 +336,8 @@ header would put a row that was never in the file into the error message: here,
 ["4" "5" "3"] - the "3" left over from line 2.
 */
 func TestReaderRecordAfterFailedReadIsTheFailingOne(t *testing.T) {
+	t.Parallel()
+
 	reader, err := NewReader(strings.NewReader("a;b;c\n1;2;3\n4;5\n"))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -345,6 +365,8 @@ it: the caller gets rows, no error on that pass, and a table short one line. Raw
 and Typed latch on their own err, and Reader has to agree with them.
 */
 func TestReaderStopsForGoodAfterAnError(t *testing.T) {
+	t.Parallel()
+
 	reader, err := NewReader(strings.NewReader("a;b;c\n1;2;3\n4;5\n6;7;8\n"))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -355,8 +377,8 @@ func TestReaderStopsForGoodAfterAnError(t *testing.T) {
 	}
 
 	first := reader.Err()
-	if !errors.Is(first, ErrParse) {
-		t.Fatalf("Err() = %v, want an error wrapping ErrParse", first)
+	if !errors.Is(first, csvcopy.ErrParse) {
+		t.Fatalf("Err() = %v, want an error wrapping csvcopy.ErrParse", first)
 	}
 
 	for record := range reader.All() {
@@ -370,6 +392,8 @@ func TestReaderStopsForGoodAfterAnError(t *testing.T) {
 // Err must not outlive the failure it describes - and it cannot, because the
 // reader never reads on after one.
 func TestReaderErrIsNilUntilSomethingFails(t *testing.T) {
+	t.Parallel()
+
 	reader, err := NewReader(strings.NewReader("a;b\n1;2\n"))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -402,6 +426,8 @@ them to the wrong row, and the further into the file, the further off.
 	7  5        <- one field where the header has two
 */
 func TestReaderLineIsPhysicalNotARecordCount(t *testing.T) {
+	t.Parallel()
+
 	reader, err := NewReader(strings.NewReader("a;b\n\n1;2\n\"x\ny\nz\";4\n5\n"))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -433,6 +459,8 @@ func TestReaderLineIsPhysicalNotARecordCount(t *testing.T) {
 // csv.ParseError names the line in its own message, so the wrapper must not name
 // it again: "line 3: record on line 3: ..." reads like two different lines.
 func TestReaderParseErrorNamesTheLineOnce(t *testing.T) {
+	t.Parallel()
+
 	reader, err := NewReader(strings.NewReader("a;b\n1\n"))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -448,18 +476,21 @@ func TestReaderParseErrorNamesTheLineOnce(t *testing.T) {
 }
 
 /*
-A stream that breaks mid-file is ErrIO, not ErrParse, and still carries a line.
+A stream that breaks mid-file is csvcopy.ErrIO, not csvcopy.ErrParse, and still
+carries a line.
 
-The distinction is the point: a caller that quarantines files on ErrParse would
-otherwise quarantine a perfectly good file because the network blinked. The file is
-fine, the read is not, and the right answer is to try again.
+The distinction is the point: a caller that quarantines files on
+csvcopy.ErrParse would otherwise quarantine a perfectly good file because the
+network blinked. The file is fine, the read is not, and the right answer is to
+try again.
 
 encoding/csv passes an I/O error through as itself rather than wrapping it in a
-csv.ParseError, so there is no line to take from it and the count kept here is what
-names the record. That is the one case where the two ways of numbering cannot
-agree, and a count is the best available answer.
+csv.ParseError, so there is no line to take from it. What is left is the last
+record read in full, and the error says that it is a bound and not a line.
 */
 func TestReaderMidStreamReadErrorIsErrIO(t *testing.T) {
+	t.Parallel()
+
 	want := errors.New("network is down")
 
 	reader, err := NewReader(&brokenReader{data: []byte("a;b\n1;2\n"), err: want})
@@ -474,23 +505,80 @@ func TestReaderMidStreamReadErrorIsErrIO(t *testing.T) {
 	if !errors.Is(err, want) {
 		t.Fatalf("Read = %v, want it to wrap %v", err, want)
 	}
-	if !errors.Is(err, ErrIO) {
-		t.Errorf("error %v does not wrap ErrIO", err)
+	if !errors.Is(err, csvcopy.ErrIO) {
+		t.Errorf("error %v does not wrap csvcopy.ErrIO", err)
 	}
-	if errors.Is(err, ErrParse) {
-		t.Error("a read failure must not wrap ErrParse: the file is not the problem")
+	if errors.Is(err, csvcopy.ErrParse) {
+		t.Error("a read failure must not wrap csvcopy.ErrParse: the file is not the problem")
 	}
-	if !strings.Contains(err.Error(), "line 3") {
-		t.Errorf("error %q does not name line 3", err)
+	if !strings.Contains(err.Error(), "after line 2") {
+		t.Errorf("error %q does not put the failure after line 2, the last record read in full", err)
 	}
-	if got, want := reader.Line(), 3; got != want {
+	if got, want := reader.Line(), 2; got != want {
 		t.Errorf("Line() = %d, want %d", got, want)
+	}
+}
+
+/*
+The same failure after a record that spans several lines, which is where the old
+count was not merely imprecise but wrong: it said line 3, and the stream broke on
+line 6.
+
+A caller opening the file at the number in the message has to find something
+related to the failure there, or the number is worse than none.
+*/
+func TestReaderIOErrorAfterMultilineRecordDoesNotInventALine(t *testing.T) {
+	t.Parallel()
+
+	want := errors.New("network is down")
+	data := []byte("a;b\n\"one\ntwo\nthree\nfour\";2\n")
+
+	reader, err := NewReader(&brokenReader{data: data, err: want})
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if _, err = reader.Read(); err != nil {
+		t.Fatalf("Read row 1: %v", err)
+	}
+	if got, want := reader.Line(), 2; got != want {
+		t.Fatalf("Line() after the multiline record = %d, want %d", got, want)
+	}
+
+	_, err = reader.Read()
+	if !errors.Is(err, csvcopy.ErrIO) {
+		t.Fatalf("Read = %v, want csvcopy.ErrIO", err)
+	}
+	if strings.Contains(err.Error(), "line 3") {
+		t.Errorf("error %q names line 3, which is inside the record that read fine", err)
+	}
+	if !strings.Contains(err.Error(), "after line 2") {
+		t.Errorf("error %q does not put the failure after line 2", err)
+	}
+}
+
+// A stream that fails before a single record has been read has no line to name at
+// all, and must not name one.
+func TestReaderIOErrorBeforeTheHeaderHasNoLine(t *testing.T) {
+	t.Parallel()
+
+	want := errors.New("network is down")
+
+	// Enough bytes to get past the BOM check, and no newline, so the failure lands
+	// in the header read rather than in skipBOM.
+	_, err := NewReader(&brokenReader{data: []byte("a;b"), err: want})
+	if !errors.Is(err, csvcopy.ErrIO) {
+		t.Fatalf("NewReader = %v, want csvcopy.ErrIO", err)
+	}
+	if strings.Contains(err.Error(), "line 0") || strings.Contains(err.Error(), "line 1") {
+		t.Errorf("error %q names a line the reader never reached", err)
 	}
 }
 
 // A cancelled context has to stay recognisable through the wrapping, or a caller
 // cannot tell "we gave up" from "the disk died".
 func TestReaderCancelledContextIsErrIO(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -506,17 +594,20 @@ func TestReaderCancelledContextIsErrIO(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("error %v does not unwrap to context.Canceled", err)
 	}
-	if !errors.Is(err, ErrIO) {
-		t.Errorf("error %v does not wrap ErrIO", err)
+	if !errors.Is(err, csvcopy.ErrIO) {
+		t.Errorf("error %v does not wrap csvcopy.ErrIO", err)
 	}
-	if errors.Is(err, ErrParse) {
+	if errors.Is(err, csvcopy.ErrParse) {
 		t.Error("a cancelled read must not look like a bad file")
 	}
 }
 
-// Malformed content stays ErrParse. This is the other half of the classification,
-// and the regression that keeps ErrIO from swallowing everything.
+// Malformed content stays csvcopy.ErrParse. This is the other half of the
+// classification, and the regression that keeps csvcopy.ErrIO from swallowing
+// everything.
 func TestReaderMalformedContentStaysErrParse(t *testing.T) {
+	t.Parallel()
+
 	tests := map[string]string{
 		"short record":   "a;b;c\n1;2\n",
 		"unclosed quote": "a;b\n\"open;x\n",
@@ -524,16 +615,18 @@ func TestReaderMalformedContentStaysErrParse(t *testing.T) {
 
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
 			reader, err := NewReader(strings.NewReader(input))
 			if err != nil {
 				t.Fatalf("NewReader: %v", err)
 			}
 
 			_, err = reader.Read()
-			if !errors.Is(err, ErrParse) {
-				t.Fatalf("Read = %v, want an error wrapping ErrParse", err)
+			if !errors.Is(err, csvcopy.ErrParse) {
+				t.Fatalf("Read = %v, want an error wrapping csvcopy.ErrParse", err)
 			}
-			if errors.Is(err, ErrIO) {
+			if errors.Is(err, csvcopy.ErrIO) {
 				t.Error("malformed content must not be reported as a read failure")
 			}
 		})
@@ -549,6 +642,8 @@ FieldPos panics on a field it does not have, and a future version of encoding/cs
 is not the right place to find that out.
 */
 func TestRecordLineWithoutFields(t *testing.T) {
+	t.Parallel()
+
 	cr := csv.NewReader(strings.NewReader("a\n"))
 
 	if got, want := recordLine(cr, nil, 42), 42; got != want {
@@ -557,6 +652,8 @@ func TestRecordLineWithoutFields(t *testing.T) {
 }
 
 func TestReaderReadAfterEOFStaysEOF(t *testing.T) {
+	t.Parallel()
+
 	reader, err := NewReader(strings.NewReader("a\n1\n"))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)

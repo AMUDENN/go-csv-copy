@@ -1,12 +1,17 @@
-package csvcopy
+package copyfrom
 
 import (
 	"errors"
 	"strings"
 	"testing"
+
+	csvcopy "github.com/AMUDENN/go-csv-copy"
+	"github.com/AMUDENN/go-csv-copy/decode"
 )
 
 func TestValidateColumns(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		columns []string
@@ -33,7 +38,19 @@ func TestValidateColumns(t *testing.T) {
 		{
 			name:     "duplicate",
 			columns:  []string{"id", "name", "id"},
-			mentions: []string{"column 3", "column 1", `"id"`},
+			mentions: []string{"column 3", "duplicates column 1", `"id"`},
+		},
+		// Two columns quoted, one column unquoted - and the unquoted reading is the
+		// one this function is asked about.
+		{
+			name:     "differs only in case",
+			columns:  []string{"ID", "id"},
+			mentions: []string{"column 2", `"id"`, "collides with column 1", `"ID"`},
+		},
+		{
+			name:     "case collision is worded differently from an exact duplicate",
+			columns:  []string{"Name", "name"},
+			mentions: []string{"unless both are quoted"},
 		},
 		{
 			name:     "over 63 bytes",
@@ -49,6 +66,23 @@ func TestValidateColumns(t *testing.T) {
 			name:     "double quote",
 			columns:  []string{`x" ); DROP TABLE clients; --`},
 			mentions: []string{"column 1", `'"'`},
+		},
+		// Passes every character rule and still cannot open a column definition:
+		// CREATE TABLE t (123 TEXT) is a syntax error.
+		{
+			name:     "starts with a digit",
+			columns:  []string{"123"},
+			mentions: []string{"column 1", `"123"`, "starts with a digit"},
+		},
+		{
+			name:     "digit prefix on an otherwise ordinary name",
+			columns:  []string{"2023_q1"},
+			mentions: []string{"starts with a digit"},
+		},
+		{
+			name:    "a digit anywhere else is fine",
+			columns: []string{"q1_2023", "col9"},
+			ok:      true,
 		},
 		{
 			name:     "semicolon",
@@ -76,6 +110,8 @@ func TestValidateColumns(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			err := ValidateColumns(test.columns)
 
 			if test.ok {
@@ -89,8 +125,8 @@ func TestValidateColumns(t *testing.T) {
 			if !errors.Is(err, ErrInvalidColumns) {
 				t.Fatalf("error = %v, want ErrInvalidColumns", err)
 			}
-			if !errors.Is(err, ErrParse) {
-				t.Error("ErrInvalidColumns must wrap ErrParse: it is a property of the file")
+			if !errors.Is(err, csvcopy.ErrParse) {
+				t.Error("ErrInvalidColumns must wrap csvcopy.ErrParse: it is a property of the file")
 			}
 			for _, want := range test.mentions {
 				if !strings.Contains(err.Error(), want) {
@@ -108,7 +144,9 @@ One run should tell the whole story of the file. Reporting the first problem onl
 turns fixing an export into one round trip per column.
 */
 func TestValidateColumnsReportsEveryProblem(t *testing.T) {
-	err := ValidateColumns([]string{"", "id;drop", "id", "id", strings.Repeat("z", 70)})
+	t.Parallel()
+
+	err := ValidateColumns([]string{"", "id;drop", "id", "id", strings.Repeat("z", 70), "9lives"})
 	if !errors.Is(err, ErrInvalidColumns) {
 		t.Fatalf("error = %v, want ErrInvalidColumns", err)
 	}
@@ -118,6 +156,8 @@ func TestValidateColumnsReportsEveryProblem(t *testing.T) {
 		"column 2",
 		"column 4 duplicates column 3",
 		"70 bytes",
+		"column 6",
+		"starts with a digit",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q is missing %q", err, want)
@@ -128,10 +168,14 @@ func TestValidateColumnsReportsEveryProblem(t *testing.T) {
 // The header a Raw source hands out is exactly what goes into ValidateColumns, so
 // the two have to agree about what a column name is after normalization.
 func TestValidateColumnsOverRawHeader(t *testing.T) {
+	t.Parallel()
+
 	t.Run("clean file", func(t *testing.T) {
-		src, err := NewRaw(strings.NewReader("id;last_name\n1;Smith\n"))
+		t.Parallel()
+
+		src, err := decode.NewRaw(strings.NewReader("id;last_name\n1;Smith\n"))
 		if err != nil {
-			t.Fatalf("NewRaw: %v", err)
+			t.Fatalf("decode.NewRaw: %v", err)
 		}
 		if err = ValidateColumns(src.Columns()); err != nil {
 			t.Errorf("ValidateColumns = %v, want nil", err)
@@ -139,9 +183,11 @@ func TestValidateColumnsOverRawHeader(t *testing.T) {
 	})
 
 	t.Run("hostile file", func(t *testing.T) {
-		src, err := NewRaw(strings.NewReader(`id;"x"" ); DROP TABLE clients; --"` + "\n1;2\n"))
+		t.Parallel()
+
+		src, err := decode.NewRaw(strings.NewReader(`id;"x"" ); DROP TABLE clients; --"` + "\n1;2\n"))
 		if err != nil {
-			t.Fatalf("NewRaw: %v", err)
+			t.Fatalf("decode.NewRaw: %v", err)
 		}
 		if err = ValidateColumns(src.Columns()); !errors.Is(err, ErrInvalidColumns) {
 			t.Fatalf("ValidateColumns = %v, want ErrInvalidColumns for %q", err, src.Columns())

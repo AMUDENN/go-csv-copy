@@ -1,9 +1,12 @@
-package csvcopy
+package decode
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"iter"
+
+	csvcopy "github.com/AMUDENN/go-csv-copy"
 )
 
 /*
@@ -18,16 +21,30 @@ structural, so the method set alone is enough and the version of pgx stays the
 application's choice.
 */
 type Raw struct {
+	// The Reader, the value slice and the string array behind it are all shared by
+	// a copy, which then reads from the same stream into the same buffers as the
+	// original. noCopy makes go vet refuse it - the same reason as on Typed, where
+	// the damage is quieter but the shape is identical.
+	_ noCopy
+
 	reader *Reader
 	vals   []any
 	// strs backs vals under WithPointerValues, and is nil otherwise.
-	strs []string
-	rows int64
-	err  error
-	done bool
+	strs      []string
+	rows      int64
+	err       error
+	done      bool
+	started   bool
+	truncated bool
+	extra     int
 }
 
-// NewRaw reads the header and prepares a source over the rows after it.
+/*
+NewRaw reads the header and prepares a source over the rows after it.
+
+Use the pointer it returns. Copying the value would give two sources sharing one
+Reader and one row buffer, which is not a shape anything here is written for.
+*/
 func NewRaw(r io.Reader, opts ...Option) (*Raw, error) {
 	reader, err := NewReader(r, opts...)
 	if err != nil {
@@ -64,7 +81,7 @@ pattern puts them on the path to CREATE TABLE. A column called
 
 is just a text file someone wrote. Quote every name that reaches a statement with
 pgx.Identifier{name}.Sanitize(), or reject the header up front with
-ValidateColumns. For CopyFrom itself, pgx quotes them.
+copyfrom.ValidateColumns. For CopyFrom itself, pgx quotes them.
 */
 func (s *Raw) Columns() []string {
 	return s.reader.Columns()
@@ -101,9 +118,51 @@ func (s *Raw) Next() bool {
 			s.vals[i] = record[i]
 		}
 	}
+	s.truncated = len(record) < len(s.vals)
+	s.extra = max(len(record)-len(s.vals), 0)
 	s.rows++
+	s.started = true
 
 	return true
+}
+
+/*
+Truncated reports whether the record behind the current row ran out before the
+header's last column, so the trailing values are NULL because they were absent
+rather than because the file left them blank.
+
+Only meaningful after Next returned true, and only ever true under
+WithVariableColumns - without it a short record is an error instead.
+
+Unlike Typed.Truncated, this one is not the only way to see it: a NULL in the data
+says the same thing. It is here so a caller does not have to go looking through
+[]any to find out, and so the two sources answer the same question the same way.
+*/
+func (s *Raw) Truncated() bool {
+	return s.truncated
+}
+
+/*
+Extra is how many values the current record had beyond the header's columns, all
+of which were dropped.
+
+This one cannot be seen any other way. A record wider than the header loses its
+tail silently: Values is sized by the header, the extra cells never reach it, and
+nothing in the data hints that they existed. And a row that is too wide almost
+always means the delimiter or the quoting is being misread - the signal
+WithVariableColumns is off by default to preserve, handed back for callers who
+turned it on and still want to know:
+
+	for src.Next() {
+		if n := src.Extra(); n > 0 {
+			log.Warn("dropped values", "line", src.Line(), "count", n)
+		}
+	}
+
+Zero without WithVariableColumns, where a wide record is an error instead.
+*/
+func (s *Raw) Extra() int {
+	return s.extra
 }
 
 /*
@@ -112,8 +171,17 @@ Values returns the current row.
 The slice is reused between rows, which is safe for pgx.CopyFrom because it
 encodes each row before asking for the next. A caller driving the source by hand
 must not hold on to it.
+
+Calling it before the first Next is csvcopy.ErrSchema: there is no row yet, and
+the slice at that point is one empty value per column - a row that would load
+without complaint. pgx.CopyFrom always calls Next first; a caller driving the
+source by hand is the one that can get here.
 */
 func (s *Raw) Values() ([]any, error) {
+	if !s.started {
+		return nil, fmt.Errorf("%w: Values called before Next", csvcopy.ErrSchema)
+	}
+
 	return s.vals, nil
 }
 
@@ -141,8 +209,9 @@ there is no reason to go through the boxing.
 func (s *Raw) All() iter.Seq[[]any] {
 	return func(yield func([]any) bool) {
 		for s.Next() {
-			// Values cannot fail. The error in its signature is the shape
-			// pgx.CopyFromSource asks for, not something this source can produce.
+			// Values cannot fail here: the only error it has is for being called
+			// before the first Next, and this loop calls Next first. The error in
+			// its signature is the shape pgx.CopyFromSource asks for.
 			values, _ := s.Values()
 			if !yield(values) {
 				return

@@ -1,4 +1,4 @@
-package csvcopy
+package decode
 
 import (
 	"errors"
@@ -6,6 +6,8 @@ import (
 	"io"
 	"iter"
 	"reflect"
+
+	csvcopy "github.com/AMUDENN/go-csv-copy"
 )
 
 /*
@@ -17,23 +19,27 @@ by convert. The split is deliberate: only the caller can decide whether an empty
 cell is a NULL or a zero, and whether a bad value fails the file or the field, so
 this package never converts anything itself.
 
-Typed satisfies RowSource[D], so decoding and the layout of a COPY row can live in
-different layers: one hands out a RowSource, and the layer that owns the database
-decides which columns it lands in.
+Typed satisfies copyfrom.RowSource[D], so decoding and the layout of a COPY row can
+live in different layers: one hands out a RowSource, and the layer that owns the
+database decides which columns it lands in. This package never learns which.
 */
 type Typed[S any, D any] struct {
+	// plan holds pointers into row, so a copy of this struct would decode into the
+	// original's fields while convert read its own. noCopy makes go vet say so.
+	_ noCopy
+
 	reader  *Reader
 	plan    decodePlan
 	unused  []string
 	convert func(*S) (D, error)
 
 	row       S
-	rowVal    reflect.Value
 	current   D
 	rows      int64
 	err       error
 	done      bool
 	truncated bool
+	extra     int
 }
 
 /*
@@ -44,13 +50,26 @@ convert is called once per row with a pointer to a struct that is reused for the
 whole file, so it must not keep that pointer. Returning an error from it stops the
 stream, and the error is reported with the line it came from.
 
+That error is wrapped in csvcopy.ErrParse, since the usual reason a row fails to
+convert is the row. Where that is wrong - convert reached a lookup table that
+was down, and the file is fine - return an error wrapping csvcopy.ErrIO and it
+stays csvcopy.ErrIO, so a caller that quarantines files on csvcopy.ErrParse does
+not quarantine this one. csvcopy.ErrSchema is kept the same way. A cancelled
+context needs no wrapping: an error carrying context.Canceled or
+context.DeadlineExceeded is reported as csvcopy.ErrIO.
+
 Only the fields a column bound to are written before each call. A field no tag
 asked for - untagged, or tagged "-" - is never touched, so whatever convert leaves
 in one it will see again on the next row.
+
+Use the pointer this returns; the value behind it must not be copied. The decode
+plan holds the addresses of that struct's own fields, so a copy would decode into
+the original while convert read the copy - every field empty, on every row, with
+nothing reporting it. go vet refuses the copy, which is why noCopy is embedded.
 */
 func NewTyped[S any, D any](r io.Reader, convert func(*S) (D, error), opts ...Option) (*Typed[S, D], error) {
 	if convert == nil {
-		return nil, fmt.Errorf("%w: convert is nil", ErrSchema)
+		return nil, fmt.Errorf("%w: convert is nil", csvcopy.ErrSchema)
 	}
 
 	reader, err := NewReader(r, opts...)
@@ -59,7 +78,6 @@ func NewTyped[S any, D any](r io.Reader, convert func(*S) (D, error), opts ...Op
 	}
 
 	source := &Typed[S, D]{reader: reader, convert: convert}
-	source.rowVal = reflect.ValueOf(&source.row).Elem()
 
 	// An empty file has no header to bind to, but the struct is still checked:
 	// a tag on a non-string field is a bug that should not wait for a file with
@@ -73,10 +91,14 @@ func NewTyped[S any, D any](r io.Reader, convert func(*S) (D, error), opts ...Op
 		return source, nil
 	}
 
-	source.plan, source.unused, err = buildPlan[S](reader.Columns(), reader.settings)
+	bindings, unused, err := buildPlan[S](reader.Columns(), reader.settings)
 	if err != nil {
 		return nil, err
 	}
+	source.unused = unused
+	// Resolved against source.row here rather than per row: source is on the heap
+	// and its fields do not move, so the addresses are good for the whole file.
+	source.plan = bindPlan(bindings, reflect.ValueOf(&source.row).Elem())
 
 	return source, nil
 }
@@ -98,7 +120,8 @@ func (s *Typed[S, D]) Next() bool {
 		return false
 	}
 
-	s.truncated = s.plan.apply(record, s.rowVal)
+	s.truncated = s.plan.apply(record)
+	s.extra = max(len(record)-len(s.reader.Columns()), 0)
 
 	value, err := s.convert(&s.row)
 	if err != nil {
@@ -179,6 +202,33 @@ If a row needs to be rejected for being short, reject it here.
 */
 func (s *Typed[S, D]) Truncated() bool {
 	return s.truncated
+}
+
+/*
+Extra is how many values the current record had beyond the header's columns, all
+of which were dropped.
+
+The counterpart to Truncated, for the other end of the record, and the one that
+cannot be seen any other way here. A tag can only ask for a column the header
+names, so values past the last one bind to nothing and never reach the struct -
+Record shows the raw record, but nothing in the decoded row says it was longer
+than the file said it would be.
+
+That matters because a record wider than its header almost always means the
+delimiter or the quoting is being misread, which is the signal
+WithVariableColumns turns off. Read it in the loop if you want it back:
+
+	for source.Next() {
+		if n := source.Extra(); n > 0 {
+			log.Warn("dropped values", "line", source.Line(), "count", n)
+		}
+	}
+
+Only meaningful after Next returned true, and zero without WithVariableColumns,
+where a wide record is an error instead.
+*/
+func (s *Typed[S, D]) Extra() int {
+	return s.extra
 }
 
 // Header returns the header as read and normalized, or nil if the file was empty.

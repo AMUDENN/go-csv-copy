@@ -1,10 +1,12 @@
-package csvcopy
+package decode
 
 import (
 	"errors"
 	"io"
 	"strings"
 	"testing"
+
+	csvcopy "github.com/AMUDENN/go-csv-copy"
 )
 
 /*
@@ -149,19 +151,19 @@ func FuzzTyped(f *testing.F) {
 assertClassified is the taxonomy as an assertion: every error this package produces
 has to match one of the three sentinels, because that is what a caller branches on.
 
-An unclassified error is not a crash, so no amount of fuzzing for panics would find
-it - and a caller would silently take the wrong recovery path for it.
-ErrMissingColumns, ErrInvalidColumns and ErrRecordTooLarge all wrap ErrParse, so
-they are covered here too.
+An unclassified error is not a crash, so no amount of fuzzing for panics would
+find it - and a caller would silently take the wrong recovery path for it.
+ErrMissingColumns, ErrInvalidColumns and ErrRecordTooLarge all wrap
+csvcopy.ErrParse, so they are covered here too.
 */
 func assertClassified(t *testing.T, err error) {
 	t.Helper()
 
-	if errors.Is(err, ErrParse) || errors.Is(err, ErrIO) || errors.Is(err, ErrSchema) {
+	if errors.Is(err, csvcopy.ErrParse) || errors.Is(err, csvcopy.ErrIO) || errors.Is(err, csvcopy.ErrSchema) {
 		return
 	}
 
-	t.Fatalf("error %v matches none of ErrParse, ErrIO, ErrSchema", err)
+	t.Fatalf("error %v matches none of csvcopy.ErrParse, csvcopy.ErrIO, csvcopy.ErrSchema", err)
 }
 
 /*

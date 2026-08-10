@@ -1,7 +1,8 @@
-package csvcopy
+package decode
 
 import (
 	"bytes"
+	"context"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"iter"
 	"strings"
 	"unicode/utf8"
+
+	csvcopy "github.com/AMUDENN/go-csv-copy"
 )
 
 const bomLen = 3
@@ -38,32 +41,50 @@ NewReader reads the header and prepares the reader for row-by-row use.
 
 An empty input is not an error: Columns returns nil and Read returns io.EOF at
 once. What an empty file means is the caller's decision, not this package's.
+
+Every option is validated here, including the ones only a Typed will read: a
+Reader has no use for WithTag, but one settings type serves all three layers, and
+a caller who mistyped an option should learn it from the constructor they called
+rather than from the one they call next week.
 */
 func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 	if r == nil {
-		return nil, fmt.Errorf("%w: reader is nil", ErrSchema)
+		return nil, fmt.Errorf("%w: reader is nil", csvcopy.ErrSchema)
 	}
 
 	set := newSettings(opts)
 
 	if !validDelim(set.comma) {
-		return nil, fmt.Errorf("%w: %q is not a usable delimiter", ErrSchema, set.comma)
+		return nil, fmt.Errorf("%w: %q is not a usable delimiter", csvcopy.ErrSchema, set.comma)
+	}
+	// reflect.StructTag.Get("") answers "" for every field, so an empty tag name
+	// would bind nothing and read as an untagged struct - the same silent failure
+	// taggedFields refuses, one step earlier and with a clearer cause.
+	if set.tag == "" {
+		return nil, fmt.Errorf("%w: the struct tag name is empty", csvcopy.ErrSchema)
+	}
+	// Not clamped to "no cap" the way a bad header row is clamped to 1: removing
+	// the only bound on this package's memory is not a safe reading of a number
+	// that arithmetic produced by accident.
+	if set.maxRecordBytes < 0 {
+		return nil, fmt.Errorf("%w: the record byte cap is negative (%d); pass 0 to remove it",
+			csvcopy.ErrSchema, set.maxRecordBytes)
 	}
 	if set.comment != 0 {
 		if !validDelim(set.comment) {
-			return nil, fmt.Errorf("%w: %q is not a usable comment rune", ErrSchema, set.comment)
+			return nil, fmt.Errorf("%w: %q is not a usable comment rune", csvcopy.ErrSchema, set.comment)
 		}
 		if set.comment == set.comma {
 			return nil, fmt.Errorf("%w: the comment rune and the delimiter are both %q",
-				ErrSchema, set.comma)
+				csvcopy.ErrSchema, set.comma)
 		}
 	}
 
 	body, err := skipBOM(r)
 	if err != nil {
 		// The stream failed before a byte of content existed to be malformed, so
-		// this is ErrIO and not a bad file.
-		return nil, fmt.Errorf("%w: read bom: %w", ErrIO, err)
+		// this is csvcopy.ErrIO and not a bad file.
+		return nil, fmt.Errorf("%w: read bom: %w", csvcopy.ErrIO, err)
 	}
 
 	var budget *budgetReader
@@ -84,13 +105,19 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 
 	reader := &Reader{settings: set}
 
+	// The physical line of the last record read in full, which is where an error
+	// with no line of its own is attributed to - zero until one has been read.
+	line := 0
+
 	for row := 1; row < set.headerRow; row++ {
-		if _, err = readRecord(cr, budget); err != nil {
+		record, err := readRecord(cr, budget)
+		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return reader, nil
 			}
-			return nil, classify(row, err)
+			return nil, classify(errorLine(line, err), err)
 		}
+		line = recordLine(cr, record, line+1)
 	}
 
 	header, err := readRecord(cr, budget)
@@ -98,7 +125,7 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 		if errors.Is(err, io.EOF) {
 			return reader, nil
 		}
-		return nil, classify(set.headerRow, err)
+		return nil, classify(errorLine(line, err), err)
 	}
 
 	reader.columns = make([]string, len(header))
@@ -124,7 +151,7 @@ which does not modify it.
 These names come out of the file and are untrusted input. Normalizing collapses
 whitespace; it does not make a name safe to paste into a statement. Before one
 reaches DDL, quote it - pgx.Identifier{name}.Sanitize() - or put the header through
-ValidateColumns. For CopyFrom, pgx quotes them itself.
+copyfrom.ValidateColumns. For CopyFrom, pgx quotes them itself.
 */
 func (r *Reader) Columns() []string {
 	return r.columns
@@ -138,7 +165,12 @@ stays right across the two things that make a record count drift from it: blank
 lines, which encoding/csv skips, and a quoted field spanning several lines. That
 number is the one an error message must carry - the caller opens the file at it.
 
-After a failed Read it names the record that failed.
+After a failed Read it names the record that failed, when encoding/csv could say
+which one that was - that is, for csvcopy.ErrParse. It cannot for csvcopy.ErrIO or
+ErrRecordTooLarge, since neither arrives as a *csv.ParseError, and there this stays
+on the last record read in full: the record that failed starts somewhere after it.
+The error message says so in as many words, "after line N" rather than "line N", so
+the two cases are told apart in the text and not only here.
 */
 func (r *Reader) Line() int {
 	return r.line
@@ -165,9 +197,9 @@ call and stays in Err. Rows are never skipped, so a caller cannot resume past a
 bad record and mistake a truncated file for a whole one.
 
 The returned slice is reused by the next call. Every error other than io.EOF
-carries the line number and wraps one of three sentinels: ErrRecordTooLarge if the
-record outgrew WithMaxRecordBytes, ErrParse if the content is malformed, or ErrIO
-if the stream underneath failed.
+says where it happened - see Line - and wraps one of three sentinels:
+ErrRecordTooLarge if the record outgrew WithMaxRecordBytes, csvcopy.ErrParse if
+the content is malformed, or csvcopy.ErrIO if the stream underneath failed.
 */
 func (r *Reader) Read() ([]string, error) {
 	if r.err != nil {
@@ -186,7 +218,7 @@ func (r *Reader) Read() ([]string, error) {
 		// its backing array is the previous record's. Keeping the old one here
 		// would leave Record holding a row that was never in the file: the fields
 		// this record did have, padded out with the last one's leftovers.
-		r.line = errorLine(r.line+1, err)
+		r.line = errorLine(r.line, err)
 		r.record = record
 		r.err = classify(r.line, err)
 
@@ -240,10 +272,30 @@ func (r *Reader) Err() error {
 	return r.err
 }
 
-// wrap attributes an error raised while handling the current record to that
-// record's line.
+/*
+wrap attributes an error raised while handling the current record to that record's
+line.
+
+The default is csvcopy.ErrParse, because the usual reason a convert func fails
+is the cell it was given. But convert is the caller's code and can fail for
+reasons the file is not responsible for: a lookup table that is unreachable, a
+cache that is down, a context that was cancelled while the load ran. Filing
+those under csvcopy.ErrParse would send a good file to quarantine on a caller
+that follows the package's own advice.
+
+So a category convert already named survives, and a cancelled context is read as
+csvcopy.ErrIO without being asked to say so - nobody wraps context.Canceled by
+hand, and it is never the file's fault.
+*/
 func (r *Reader) wrap(err error) error {
-	return fmt.Errorf("%w: line %d: %w", ErrParse, r.line, err)
+	if errors.Is(err, csvcopy.ErrIO) || errors.Is(err, csvcopy.ErrSchema) {
+		return fmt.Errorf("line %d: %w", r.line, err)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: line %d: %w", csvcopy.ErrIO, r.line, err)
+	}
+
+	return fmt.Errorf("%w: line %d: %w", csvcopy.ErrParse, r.line, err)
 }
 
 /*
@@ -251,11 +303,11 @@ validDelim repeats the check encoding/csv makes when it reads its first record. 
 governs both the field delimiter and the comment rune, which the standard library
 holds to the same rule.
 
-Done here so that an unusable rune is an ErrSchema from the constructor rather than
-an ErrParse on the first row: it is a bug in the calling code, no input file will
-ever fix it, and a caller that quarantines files on ErrParse must not act on it.
-Doing it up front also keeps an empty input from turning into an error, which the
-package promises it never is.
+Done here so that an unusable rune is an csvcopy.ErrSchema from the constructor
+rather than an csvcopy.ErrParse on the first row: it is a bug in the calling
+code, no input file will ever fix it, and a caller that quarantines files on
+csvcopy.ErrParse must not act on it. Doing it up front also keeps an empty input
+from turning into an error, which the package promises it never is.
 */
 func validDelim(delim rune) bool {
 	switch delim {
@@ -284,8 +336,33 @@ func recordLine(cr *csv.Reader, record []string, fallback int) int {
 	return line
 }
 
+/*
+after is the last record read in full, printed as the bound it is.
+
+The distinction is not pedantry. Only encoding/csv can name the line a record
+starts on, and it only does so through *csv.ParseError - which carries the line in
+its own message, so nothing here has to print it. Every other error leaves the
+reader with nothing but the last record it read in full, and the record that failed
+starts somewhere after that one: how far after depends on blank lines and on how
+many lines the previous record spanned, neither of which is countable here.
+Printing that guess as "line N" would send the caller to a line that has nothing to
+do with the failure.
+
+Zero means no record was ever read, so there is not even a bound to give.
+*/
+type after int
+
+func (a after) String() string {
+	if a > 0 {
+		return fmt.Sprintf("after line %d", int(a))
+	}
+
+	return "at the start of the file"
+}
+
 // errorLine prefers the line encoding/csv reports, which is accurate even when a
-// quoted field spans several physical lines.
+// quoted field spans several physical lines. fallback is the last record read in
+// full, which is a lower bound rather than an answer - classify prints it as one.
 func errorLine(fallback int, err error) int {
 	var parseErr *csv.ParseError
 	if errors.As(err, &parseErr) {
@@ -320,23 +397,24 @@ three outcomes are the three sentinels.
 
 The order matters. The byte budget is enforced by a reader, which makes it look like
 an I/O failure, but a record too large to read is a property of the file - it goes
-to ErrRecordTooLarge, not ErrIO.
+to ErrRecordTooLarge, not csvcopy.ErrIO.
 
 A csv.ParseError already names the line in its own message, so repeating it here
 would print it twice - "line 12: record on line 12: ..." - for the error type that
-produces most of these.
+produces most of these. The other two carry whatever the reader can honestly say
+about where they happened, which is usually "after line N" rather than a line.
 */
 func classify(line int, err error) error {
 	if errors.Is(err, errRecordTooLarge) {
-		return fmt.Errorf("%w: line %d", ErrRecordTooLarge, line)
+		return fmt.Errorf("%w: %s", ErrRecordTooLarge, after(line))
 	}
 
 	var parseErr *csv.ParseError
 	if errors.As(err, &parseErr) {
-		return fmt.Errorf("%w: %w", ErrParse, err)
+		return fmt.Errorf("%w: %w", csvcopy.ErrParse, err)
 	}
 
-	return fmt.Errorf("%w: line %d: %w", ErrIO, line, err)
+	return fmt.Errorf("%w: %s: %w", csvcopy.ErrIO, after(line), err)
 }
 
 /*

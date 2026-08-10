@@ -69,6 +69,19 @@ jobs:
       - name: bench
         run: go test -bench=. -benchmem -benchtime=1x ./...
 
+      # A tag is immutable in the module proxy, so a source file left out of the
+      # index is not a small mistake: the version that lands there never builds
+      # and never can. This is the only failure mode the rest of the gate cannot
+      # see, because it runs against the checkout rather than against the index.
+      - name: no untracked sources
+        run: |
+          untracked=$(git ls-files -o --exclude-standard -- '*.go' 'go.mod' 'go.sum')
+          if [ -n "$untracked" ]; then
+            echo "source files are not in the index:"
+            echo "$untracked"
+            exit 1
+          fi
+
       # The whole point of the package is that it needs nothing but the standard
       # library. A stray require would make every consumer inherit it.
       - name: no dependencies
@@ -87,7 +100,7 @@ jobs:
           govulncheck ./...
 
   # The package is written on Windows and merged from Linux, and the `go`
-  # directive promises 1.24. Both claims need a machine behind them, and neither
+  # directive promises 1.23. Both claims need a machine behind them, and neither
   # needs the full gate above repeated on it.
   compatibility:
     runs-on: ${{ matrix.os }}
@@ -97,7 +110,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         # The oldest version go.mod allows and the newest that exists. What
         # breaks in between breaks at one end too.
-        go: ['1.24', '1.26.1']
+        go: ['1.23', '1.26.1']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -127,8 +140,10 @@ jobs:
         with:
           go-version: '1.26.1'
 
+      # One package, not ./...: -fuzz refuses to run against more than one, and the
+      # fuzz targets all live in decode.
       - name: fuzz ${{ matrix.target }}
-        run: go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=5m ./...
+        run: go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=5m ./decode
 
       # A corpus entry that failed is the whole value of the run: without it the
       # next run starts over and the finding is lost.
@@ -137,7 +152,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-corpus-${{ matrix.target }}
-          path: testdata/fuzz/
+          path: decode/testdata/fuzz/
           if-no-files-found: warn
 
   # Out of the gate as well, but for a different reason than fuzzing: it needs a
