@@ -100,8 +100,23 @@ func TestPointerValuesLoadIdentically(t *testing.T) {
 	conn := connect(t)
 	ctx := context.Background()
 
+	/*
+		Each load owns its transaction and ends it before returning.
+
+		Deferring the rollback to t.Cleanup instead would leave the first
+		transaction open across the second call, and pgx would run the second load
+		inside it - where the temporary table already exists.
+	*/
 	digest := func(pointers bool) string {
-		tx := begin(t, conn)
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() {
+			if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+				t.Logf("rollback: %v", err)
+			}
+		}()
 
 		src, err := csvcopy.NewRaw(strings.NewReader(sampleFile), csvcopy.WithPointerValues(pointers))
 		if err != nil {
