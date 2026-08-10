@@ -413,7 +413,39 @@ The option is off by default: pgx dereferences `*T` through its pointer encode p
 the ordinary way to pass a nullable text value, but this has not been verified against a real
 Postgres. Turn it on deliberately and check the loaded result.
 
-In `Copy` the boxing happens inside your own `encode`, so the option does not affect it.
+### It matters more the wider the file
+
+20k rows of 30 columns:
+
+| | ns/op | B/op | allocs/op | per row |
+|---|---|---|---|---|
+| `Typed` | 15.1 ms | 5.3 MB | 20 099 | 1 |
+| `Raw` | 20.9 ms | 14.9 MB | 620 065 | **31** |
+| `Raw` + `WithPointerValues` | 13.7 ms | 5.3 MB | 20 066 | 1 |
+
+Six times the columns, thirty-one times the allocations for `Raw`. `Typed` stays flat at one per
+row — `apply` is linear in the number of bound fields but writes into a struct and allocates
+nothing. So the option is worth 31× here against 6× on a five-column file, and it makes `Raw`
+faster than `Typed`.
+
+### The `encode` mistake that undoes it
+
+In `Copy` the boxing happens inside your own `encode`, so `WithPointerValues` does not affect it.
+What does affect it is whether `encode` appends into `dst` or returns a fresh slice. The second
+reads perfectly naturally and nothing stops you writing it:
+
+```go
+// Correct: appends into the buffer Copy keeps.
+func(dst []any, c *Client) []any { return append(dst, c.ID, c.Email) }
+
+// Costs one allocation per row, forever.
+func(_ []any, c *Client) []any { return []any{c.ID, c.Email} }
+```
+
+| | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| appending into `dst` | 23.5 ms | 11.2 MB | 600 042 |
+| returning a new slice | 26.4 ms | 19.2 MB | 700 043 |
 
 ⸻
 
