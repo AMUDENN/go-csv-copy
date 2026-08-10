@@ -139,3 +139,35 @@ jobs:
           name: fuzz-corpus-${{ matrix.target }}
           path: testdata/fuzz/
           if-no-files-found: warn
+
+  # Out of the gate as well, but for a different reason than fuzzing: it needs a
+  # database, and a job that can be skipped for want of a service should not be
+  # what decides whether a merge is allowed.
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.1'
+
+      # A nested module with its own go.mod, so it is run from its own directory.
+      # The root module never learns that pgx exists.
+      - name: integration
+        working-directory: integration
+        env:
+          POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+        run: go test -v ./...
