@@ -25,7 +25,19 @@ the data afterwards:
 	if len(src.Columns()) == 0 {
 		return nil // empty file, nothing to load
 	}
+	// The names came out of the file, so they are untrusted on the way to DDL.
+	if err := csvcopy.ValidateColumns(src.Columns()); err != nil {
+		return err
+	}
+
 	n, err := tx.CopyFrom(ctx, pgx.Identifier{table}, src.Columns(), src)
+	// The source's error first: it names the line, pgx's does not.
+	if srcErr := src.Err(); srcErr != nil {
+		return fmt.Errorf("read input at line %d: %w", src.Line(), srcErr)
+	}
+	if err != nil {
+		return err
+	}
 
 Typed takes the shape from struct tags. Columns are matched by name, so the file
 may reorder them or add new ones; a column a tag asks for and the file lacks is an
@@ -49,9 +61,19 @@ program actually works with - only the caller can tell an empty cell from a zero
 		return err
 	}
 	n, err := tx.CopyFrom(ctx, pgx.Identifier{table}, columns, source)
+	if srcErr := source.Err(); srcErr != nil {
+		return fmt.Errorf("read input at line %d: %w", source.Line(), srcErr)
+	}
+	if err != nil {
+		return err
+	}
 
 NewCopy adapts any RowSource - Typed, or one of your own over XLSX or an API - to
 pgx.CopyFromSource.
+
+Both examples check the source before pgx, and that order is not stylistic. When a
+row fails, pgx reports that its source stopped; the source reports what went wrong
+and on which line. Reading pgx's error first throws the useful one away.
 
 # Without a database
 

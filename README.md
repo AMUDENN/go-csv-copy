@@ -87,7 +87,7 @@ if err := createStagingTable(ctx, tx, table, columns); err != nil {
 
 n, err := tx.CopyFrom(ctx, pgx.Identifier{table}, columns, src)
 if srcErr := src.Err(); srcErr != nil {
-    return fmt.Errorf("parse input: %w", srcErr)
+    return fmt.Errorf("read input at line %d: %w", src.Line(), srcErr)
 }
 if err != nil {
     return fmt.Errorf("copy from: %w", err)
@@ -127,10 +127,10 @@ if err != nil {
 }
 
 _, err = tx.CopyFrom(ctx, pgx.Identifier{"clients_tmp"}, clientColumns, source)
+if srcErr := source.Err(); srcErr != nil {
+    return fmt.Errorf("read input at line %d: %w", source.Line(), srcErr)
+}
 if err != nil {
-    if srcErr := source.Err(); srcErr != nil {
-        err = srcErr
-    }
     return fmt.Errorf("copy from: %w", err)
 }
 
@@ -248,6 +248,17 @@ Embedded fields are not walked into. Left to pass, a tag one level down would bi
 field would read as empty on every row, and the column it named would reach the database as `NULL` —
 the same damage `ErrMissingColumns` exists to prevent, only without the error. List the columns on
 the struct itself.
+
+#### Why `;` and not `,`
+
+`encoding/csv` defaults to `,`, so this looks like gratuitous disagreement. It follows the target
+case. These files come out of spreadsheet exports on machines whose locale uses `,` as the decimal
+separator, where Excel and LibreOffice write `;` — and where a comma-delimited file with a single
+`1,5` in it is silently one column wider than its header. Anything reading such files hits `;`
+overwhelmingly more often than `,`.
+
+Pass `WithComma(',')` for RFC 4180 files. The default is one option away either direction; what it
+should not be is a surprise, hence this paragraph.
 
 ### Diagnostics
 
