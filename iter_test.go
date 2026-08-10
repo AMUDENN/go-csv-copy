@@ -103,7 +103,7 @@ func TestRawAll(t *testing.T) {
 
 	var got [][]any
 	for values := range src.All() {
-		got = append(got, append([]any(nil), values...))
+		got = append(got, plain(t, values))
 	}
 
 	want := [][]any{{"1", "2"}, {"3", "4"}}
@@ -165,8 +165,8 @@ func TestRawAllBreakEarly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Values: %v", err)
 	}
-	if values[0] != "3" {
-		t.Errorf("row after break = %v, want 3 - the iterator lost a row", values[0])
+	if got := plain(t, values)[0]; got != "3" {
+		t.Errorf("row after break = %v, want 3 - the iterator lost a row", got)
 	}
 }
 

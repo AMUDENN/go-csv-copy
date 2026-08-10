@@ -222,7 +222,7 @@ type RowSource[T any] interface {
 | `WithTag(string)` | `"csv"` | which struct tag `Typed` reads column names from |
 | `WithVariableColumns(bool)` | `false` | accept rows of a different width: extra values dropped, missing trailing ones → `nil` in `Raw`, `""` in `Typed` |
 | `WithAllowMissingColumns(bool)` | `false` | do not fail when a tagged column is absent from the header |
-| `WithPointerValues(bool)` | `false` | `Raw` yields `*string` instead of `string`, removing one allocation per cell |
+| `WithPointerValues(bool)` | `true` | `Raw` yields `*string`, which costs no allocation per cell. `false` gives plain `string` |
 | `WithMaxRecordBytes(int64)` | `64 MiB` | cap on one record; zero removes it. Exceeding it is `ErrRecordTooLarge` |
 | `WithComment(rune)` | `0` (off) | a rune that starts a comment line, skipped wherever it appears |
 
@@ -391,11 +391,11 @@ where from. 100k rows of 5 columns, go1.26.1, Ryzen 5 7500F:
 
 | | ns/op | B/op | allocs/op | per row |
 |---|---|---|---|---|
-| `Typed` | 13.6 ms | 3.2 MB | 100 038 | 1 |
-| `Typed` via `All()` | 14.4 ms | 3.2 MB | 100 038 | 1 |
-| `Raw` | 18.7 ms | 11.2 MB | 600 033 | 6 |
-| `Raw` via `All()` | 20.6 ms | 11.2 MB | 600 032 | 6 |
-| `Raw` + `WithPointerValues` | 11.2 ms | 3.2 MB | 100 033 | 1 |
+| `Raw` | 12.6 ms | 3.2 MB | 100 034 | 1 |
+| `Raw` via `All()` | 12.5 ms | 3.2 MB | 100 034 | 1 |
+| `Typed` | 14.6 ms | 3.2 MB | 100 039 | 1 |
+| `Typed` via `All()` | 15.0 ms | 3.2 MB | 100 039 | 1 |
+| `Raw` + `WithPointerValues(false)` | 22.1 ms | 11.2 MB | 600 033 | 6 |
 
 Ranging costs nothing: an `iter.Seq` returned from a method closes over the source once per pass,
 not once per row, so `All()` sits on the same allocation count as the `Next()` loop it replaces.
@@ -403,15 +403,17 @@ not once per row, so `All()` sits on the same allocation count as the `Next()` l
 The one allocation per row is `encoding/csv`: it creates one string per record even with
 `ReuseRecord`, and that is the floor short of `unsafe`.
 
-The other five are the columns. Boxing a `string` into an `any` **always** allocates 16 bytes for
-its header, so `Raw` pays one allocation per cell by default — that is the shape of
-`Values() ([]any, error)`. `WithPointerValues(true)` yields `*string` out of an array allocated once
-per file: a pointer is pointer-shaped, the interface holds it directly, and boxing is free. On a
-30-column file the difference is thirtyfold.
+The extra five in the last row are the columns. Boxing a `string` into an `any` **always** allocates
+16 bytes for its header, so plain strings cost one allocation per cell — that is the shape of
+`Values() ([]any, error)`. A `*string` out of an array allocated once per file is pointer-shaped: the
+interface holds it directly and boxing is free.
 
-The option is off by default: pgx dereferences `*T` through its pointer encode plan and `*string` is
-the ordinary way to pass a nullable text value, but this has not been verified against a real
-Postgres. Turn it on deliberately and check the loaded result.
+That is why `*string` is the default, and pgx cannot tell the difference — measured, not argued. The
+integration tests load the same file both ways into an all-TEXT table and compare an `md5` of the
+rows, then load both ways into a table of `bigint`, `numeric` and `date`. Both agree.
+
+Pass `WithPointerValues(false)` if you drive the source yourself and would rather type-switch over
+`string` than `*string`.
 
 ### It matters more the wider the file
 
@@ -419,14 +421,14 @@ Postgres. Turn it on deliberately and check the loaded result.
 
 | | ns/op | B/op | allocs/op | per row |
 |---|---|---|---|---|
-| `Typed` | 15.1 ms | 5.3 MB | 20 099 | 1 |
-| `Raw` | 20.9 ms | 14.9 MB | 620 065 | **31** |
-| `Raw` + `WithPointerValues` | 13.7 ms | 5.3 MB | 20 066 | 1 |
+| `Raw` | 13.2 ms | 5.3 MB | 20 066 | 1 |
+| `Typed` | 15.7 ms | 5.3 MB | 20 099 | 1 |
+| `Raw` + `WithPointerValues(false)` | 21.8 ms | 14.9 MB | 620 065 | **31** |
 
-Six times the columns, thirty-one times the allocations for `Raw`. `Typed` stays flat at one per
-row — `apply` is linear in the number of bound fields but writes into a struct and allocates
-nothing. So the option is worth 31× here against 6× on a five-column file, and it makes `Raw`
-faster than `Typed`.
+Six times the columns, thirty-one times the allocations once the values are strings. The default and
+`Typed` both stay flat at one per row — `apply` is linear in the number of bound fields but writes
+into a struct and allocates nothing. What the default saves grows with the width of the file: 31×
+here against 6× on five columns.
 
 ### The `encode` mistake that undoes it
 

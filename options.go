@@ -38,6 +38,7 @@ func newSettings(opts []Option) settings {
 		headerRow:        1,
 		normalizeHeader:  NormalizeSpace,
 		tag:              "csv",
+		pointerValues:    true,
 		maxRecordBytes:   defaultMaxRecordBytes,
 	}
 	for _, opt := range opts {
@@ -197,21 +198,25 @@ func WithAllowMissingColumns(allow bool) Option {
 }
 
 /*
-WithPointerValues makes Raw hand out *string instead of string, which removes one
-allocation per column per row.
+WithPointerValues controls whether Raw hands out *string or string. Defaults to
+true, which is *string.
 
 Putting a string into an []any boxes it, and boxing a string always allocates 16
-bytes for its header - so the default costs one allocation per cell, which on a
-wide file dwarfs everything else. A pointer is pointer-shaped: the interface holds
-it directly and boxing is free. The strings live in one array allocated per file,
-and a value the row stopped short of is a nil interface, still NULL.
+bytes for its header, so plain strings cost one allocation per cell. A pointer is
+pointer-shaped: the interface holds it directly and boxing is free. The strings live
+in one array allocated per file, and a value the row stopped short of is a nil
+interface, still NULL. On five columns that is 6 allocations per row against 1; on
+thirty it is 31 against 1.
 
-Off by default on purpose. pgx dereferences *T through its pointer encode plan and
-*string is the ordinary way to pass a nullable text value, so this should be
-transparent - but "should" is not "measured against a real database". Turn it on,
-load a real file, compare the result, then make it the default.
+The default is *string because pgx cannot tell the difference, and that is a
+measured result rather than an argument: the integration tests load the same file
+both ways into an all-TEXT table and compare an md5 of the rows, and load both ways
+into a table of bigint, numeric and date. Both pass.
 
-Affects Raw only. In Copy the boxing happens inside your own encode func.
+Pass false if you drive the source yourself and want plain strings - a type switch
+over []any is easier to write against string than *string. Nothing else in the
+package is affected: Typed decodes into your struct fields, and in Copy the boxing
+happens inside your own encode.
 */
 func WithPointerValues(pointers bool) Option {
 	return func(s *settings) { s.pointerValues = pointers }

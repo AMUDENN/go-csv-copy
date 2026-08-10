@@ -15,13 +15,13 @@ visible.
 Measured on go1.26.1 windows/amd64, one run at -benchtime=3x, 100k rows of 5
 columns:
 
-	BenchmarkRaw-6                20.1 ms   11.2 MB   600036 allocs   (6 per row)
-	BenchmarkRawAll-6             19.6 ms   11.2 MB   600034 allocs   (6 per row)
-	BenchmarkRawPointerValues-6   11.9 ms    3.2 MB   100034 allocs   (1 per row)
-	BenchmarkTyped-6              15.7 ms    3.2 MB   100039 allocs   (1 per row)
-	BenchmarkTypedAll-6           14.9 ms    3.2 MB   100039 allocs   (1 per row)
-	BenchmarkTypedCopy-6          23.5 ms   11.2 MB   600042 allocs   (6 per row)
-	BenchmarkNewTyped-6            6.3 us    6.1 kB       39 allocs   (per file)
+	BenchmarkRaw-6                12.6 ms    3.2 MB   100034 allocs   (1 per row)
+	BenchmarkRawAll-6             12.5 ms    3.2 MB   100034 allocs   (1 per row)
+	BenchmarkRawStringValues-6    22.1 ms   11.2 MB   600033 allocs   (6 per row)
+	BenchmarkTyped-6              14.6 ms    3.2 MB   100039 allocs   (1 per row)
+	BenchmarkTypedAll-6           15.0 ms    3.2 MB   100039 allocs   (1 per row)
+	BenchmarkTypedCopy-6          23.6 ms   11.2 MB   600041 allocs   (6 per row)
+	BenchmarkNewTyped-6            3.7 us    6.1 kB       39 allocs   (per file)
 
 Three runs is far too few to say anything about ns/op - treat those as an order
 of magnitude and compare allocs/op, which is stable to the allocation. The point
@@ -33,13 +33,14 @@ per-row counts are accounted for:
   - 1 per row everywhere is encoding/csv, which allocates one string per record
     even with ReuseRecord. That is the floor short of unsafe tricks.
 
-  - The other 5 are the columns. Putting a string into an []any boxes it, and
-    boxing a string always allocates 16 bytes for its header. So Raw and Copy
-    cost one allocation per column per row, by the shape of Values() ([]any, error).
+  - The extra 5 in the string-valued runs are the columns. Putting a string into
+    an []any boxes it, and boxing a string always allocates 16 bytes for its
+    header, so one allocation per cell.
 
-The columns term is avoidable: WithPointerValues hands out *string taken from an
-array allocated once per file, and a pointer is pointer-shaped, so boxing it is
-free. BenchmarkRawPointerValues is what that costs instead.
+That term is why WithPointerValues is the default: *string taken from an array
+allocated once per file is pointer-shaped, so boxing it is free.
+BenchmarkRawStringValues is what asking for plain strings costs instead, and Copy
+pays the same because the boxing there happens inside the caller's encode.
 
 The All variants sit on the same numbers as the Next-driven ones, to the
 allocation. Ranging is a way of writing the loop, not a second cost.
@@ -51,19 +52,20 @@ do, and those cost an integer subtraction.
 
 On a wide file the boxing is the whole story. 20k rows of 30 columns:
 
-	BenchmarkTypedWide-6                15.1 ms    5.3 MB    20099 allocs   (1 per row)
-	BenchmarkRawWide-6                  20.9 ms   14.9 MB   620065 allocs  (31 per row)
-	BenchmarkRawWidePointerValues-6     13.7 ms    5.3 MB    20066 allocs   (1 per row)
+	BenchmarkTypedWide-6              15.7 ms    5.3 MB    20099 allocs   (1 per row)
+	BenchmarkRawWide-6                13.2 ms    5.3 MB    20066 allocs   (1 per row)
+	BenchmarkRawWideStringValues-6    21.8 ms   14.9 MB   620065 allocs  (31 per row)
 
-Six times the columns, thirty-one times the allocations for Raw, and Typed flat at
-one per row - apply is linear in bound fields but writes into a struct and allocates
-nothing. So WithPointerValues is worth more the wider the file gets: 31x fewer
-allocations here against 6x on five columns, and faster than Typed.
+Six times the columns, thirty-one times the allocations once the values are strings,
+while both the default and Typed stay flat at one per row - apply is linear in bound
+fields but writes into a struct and allocates nothing. Which is the argument for the
+default: what it saves grows with the width of the file, 31x here against 6x on five
+columns, and it makes Raw the fastest of the three.
 
 And the mistake that undoes it, against BenchmarkTypedCopy on the same file:
 
-	BenchmarkTypedCopy-6      23.5 ms   11.2 MB   600042 allocs   (6 per row)
-	BenchmarkCopyBadEncode-6  26.4 ms   19.2 MB   700043 allocs   (7 per row)
+	BenchmarkTypedCopy-6      23.6 ms   11.2 MB   600041 allocs   (6 per row)
+	BenchmarkCopyBadEncode-6  26.4 ms   19.2 MB   700042 allocs   (7 per row)
 
 One extra allocation per row and 8 MB more, for an encode that returns a fresh
 slice instead of appending into dst. It reads perfectly naturally and nothing stops
@@ -177,16 +179,16 @@ func BenchmarkTypedCopy(b *testing.B) {
 	}
 }
 
-// The counterpart to BenchmarkRaw: the per-cell boxing is gone, leaving only the
-// one allocation per row that encoding/csv imposes.
-func BenchmarkRawPointerValues(b *testing.B) {
+// The counterpart to BenchmarkRaw, which now uses pointer values by default: this
+// is what asking for plain strings costs instead, one allocation per cell.
+func BenchmarkRawStringValues(b *testing.B) {
 	file := benchFile(benchRows)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src, err := NewRaw(bytes.NewReader(file), WithPointerValues(true))
+		src, err := NewRaw(bytes.NewReader(file), WithPointerValues(false))
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -389,16 +391,16 @@ func BenchmarkRawWide(b *testing.B) {
 	}
 }
 
-// And the same again with the boxing removed, to show the option is worth more the
-// wider the file gets.
-func BenchmarkRawWidePointerValues(b *testing.B) {
+// And the same again with plain strings, to show what the default is worth as the
+// file gets wider.
+func BenchmarkRawWideStringValues(b *testing.B) {
 	file := wideFile(wideRows)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src, err := NewRaw(bytes.NewReader(file), WithPointerValues(true))
+		src, err := NewRaw(bytes.NewReader(file), WithPointerValues(false))
 		if err != nil {
 			b.Fatal(err)
 		}

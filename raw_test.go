@@ -42,6 +42,54 @@ func drain(t *testing.T, src copyFromSource) [][]any {
 	return rows
 }
 
+/*
+plain flattens a row to comparable values whatever representation the source uses.
+
+Raw hands out *string by default and string under WithPointerValues(false). A test
+about which values were read should not have to care which of the two it got; the
+tests that are about the representation assert it directly.
+*/
+func plain(t *testing.T, values []any) []any {
+	t.Helper()
+
+	out := make([]any, len(values))
+	for i, value := range values {
+		switch typed := value.(type) {
+		case nil:
+			out[i] = nil
+		case string:
+			out[i] = typed
+		case *string:
+			if typed == nil {
+				out[i] = nil
+
+				continue
+			}
+			out[i] = *typed
+		default:
+			t.Fatalf("value %d is %T, want string, *string or nil", i, value)
+		}
+	}
+
+	return out
+}
+
+// drainPlain is drain for a source of text, comparing values rather than pointers.
+func drainPlain(t *testing.T, src copyFromSource) [][]any {
+	t.Helper()
+
+	var rows [][]any
+	for src.Next() {
+		values, err := src.Values()
+		if err != nil {
+			t.Fatalf("Values: %v", err)
+		}
+		rows = append(rows, plain(t, values))
+	}
+
+	return rows
+}
+
 func TestRaw(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -96,7 +144,7 @@ func TestRaw(t *testing.T) {
 			if got := src.Columns(); !reflect.DeepEqual(got, test.columns) {
 				t.Errorf("Columns() = %q, want %q", got, test.columns)
 			}
-			if got := drain(t, src); !reflect.DeepEqual(got, test.rows) {
+			if got := drainPlain(t, src); !reflect.DeepEqual(got, test.rows) {
 				t.Errorf("rows = %#v, want %#v", got, test.rows)
 			}
 			if err = src.Err(); err != nil {
@@ -118,7 +166,7 @@ func TestRawRejectsShortRecordByDefault(t *testing.T) {
 		t.Fatalf("NewRaw: %v", err)
 	}
 
-	if rows := drain(t, src); len(rows) != 1 {
+	if rows := drainPlain(t, src); len(rows) != 1 {
 		t.Errorf("got %d rows before the error, want 1", len(rows))
 	}
 
@@ -211,6 +259,39 @@ func TestRawPointerValuesReusePointers(t *testing.T) {
 	}
 }
 
+/*
+The escape hatch has to stay usable.
+
+Pointer values are the default because they are cheaper and pgx cannot tell the
+difference - verified against a real Postgres, not assumed. Anyone driving the source
+by hand can still ask for plain strings, and that has to keep working.
+*/
+func TestRawWithoutPointerValuesGivesStrings(t *testing.T) {
+	src, err := NewRaw(
+		strings.NewReader("a;b;c\n1;2\n"),
+		WithPointerValues(false),
+		WithVariableColumns(true),
+	)
+	if err != nil {
+		t.Fatalf("NewRaw: %v", err)
+	}
+	if !src.Next() {
+		t.Fatalf("Next() = false, Err() = %v", src.Err())
+	}
+
+	values, err := src.Values()
+	if err != nil {
+		t.Fatalf("Values: %v", err)
+	}
+	if got, ok := values[0].(string); !ok || got != "1" {
+		t.Errorf("values[0] = %#v, want the string \"1\"", values[0])
+	}
+	// A value the record never reached is still NULL, not a pointer to "".
+	if values[2] != nil {
+		t.Errorf("values[2] = %#v, want nil", values[2])
+	}
+}
+
 // pgx encodes a row before asking for the next one, so one slice is reused. This
 // pins that contract: the same backing array comes back every time.
 func TestRawValuesReuseOneSlice(t *testing.T) {
@@ -232,7 +313,7 @@ func TestRawValuesReuseOneSlice(t *testing.T) {
 		if &values[0] != &first[0] {
 			t.Error("Values() allocated a new slice instead of reusing one")
 		}
-		if got, want := values[0], "3"; got != want {
+		if got, want := plain(t, values)[0], "3"; got != want {
 			t.Errorf("values[0] = %v, want %v", got, want)
 		}
 	}

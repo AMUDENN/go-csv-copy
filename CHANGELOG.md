@@ -67,6 +67,24 @@ below `v1.0.0` the API may still move.
 
 ### Breaking
 
+- **`Raw` now yields `*string` instead of `string` by default** (`WithPointerValues` defaults to
+  `true`).
+
+  Boxing a `string` into an `any` always allocates 16 bytes for its header, so plain strings cost
+  one allocation per cell. On five columns that is 6 allocations per row against 1; on thirty it is
+  31 against 1, and it makes `Raw` the fastest of the three layers instead of the slowest.
+
+  The option existed before and was off, because "pgx dereferences `*T` through its pointer encode
+  plan" was an argument rather than a result. It is now a result: the integration tests load the
+  same file both ways into an all-TEXT table and compare an `md5` of the loaded rows, and load both
+  ways into a table of `bigint`, `numeric` and `date`. Both agree. A value the record never reached
+  is still a nil interface, so still `NULL`.
+
+  *Migration.* Nothing changes if the source goes to `pgx.CopyFrom` — which is the case the package
+  is for. If you drive `Raw` yourself and type-switch on `string`, either handle `*string` or pass
+  `WithPointerValues(false)`. `Reader.All()` still yields `[]string` and is the better path for
+  reading without a database. `Typed` and `Copy` are unaffected.
+
 - **A failing input stream is now `ErrIO`, not `ErrParse`.**
 
   `ErrIO` deliberately does not wrap `ErrParse`. Until now every non-EOF error from the underlying
