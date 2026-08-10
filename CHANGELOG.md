@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) — with the usual caveat that
 below `v1.0.0` the API may still move.
 
-## [0.1.0] — Unreleased
+## [0.1.0] — 2026-08-10
 
 ### Added
 
@@ -137,6 +137,6 @@ below `v1.0.0` the API may still move.
   `ErrParse` / `ErrMissingColumns` / `ErrSchema`, and no dependencies outside the standard
   library.
 
-[0.1.0]: https://github.com/AMUDENN/go-csv-copy/compare/v0.0.2...HEAD
+[0.1.0]: https://github.com/AMUDENN/go-csv-copy/compare/v0.0.2...v0.1.0
 [0.0.2]: https://github.com/AMUDENN/go-csv-copy/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/AMUDENN/go-csv-copy/releases/tag/v0.0.1
