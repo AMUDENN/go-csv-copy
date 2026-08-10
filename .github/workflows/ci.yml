@@ -4,6 +4,10 @@ on:
   push:
     branches: [master, main, develop]
   pull_request:
+  # For the fuzz job only. The gate below stays on push and pull_request.
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,9 +18,9 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.1'
 
@@ -35,7 +39,7 @@ jobs:
       # The action major must match the linter major: v6 refuses a v2 linter
       # outright, and .golangci.yml here is `version: "2"`.
       - name: lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@d583c34f0599d37dbac4a198b9c83201be380893 # v9.3.0
         with:
           version: v2.12.2
 
@@ -44,8 +48,22 @@ jobs:
       - name: test
         run: go test -race -coverprofile=coverage.out ./...
 
+      # A floor, not a target. It is here so that a change which adds an untested
+      # branch has to say so out loud; chasing the number for its own sake is how
+      # tests stop meaning anything. Currently 100%, so the floor sits just below.
       - name: coverage
-        run: go tool cover -func=coverage.out | tail -1
+        env:
+          COVERAGE_FLOOR: '99'
+        run: |
+          go tool cover -func=coverage.out | tail -1
+          total=$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}' | tr -d '%')
+          echo "coverage ${total}%, floor ${COVERAGE_FLOOR}%"
+          awk -v total="$total" -v floor="$COVERAGE_FLOOR" 'BEGIN {
+            if (total + 0 < floor + 0) {
+              printf "coverage %s%% is below the %s%% floor\n", total, floor
+              exit 1
+            }
+          }'
 
       # Not a performance gate, just proof the benchmarks still compile and run.
       - name: bench
@@ -65,7 +83,7 @@ jobs:
       # see in go.mod.
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           govulncheck ./...
 
   # The package is written on Windows and merged from Linux, and the `go`
@@ -81,9 +99,9 @@ jobs:
         # breaks in between breaks at one end too.
         go: ['1.24', '1.26.1']
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go }}
 
@@ -91,3 +109,65 @@ jobs:
       # runner. The gate job covers races.
       - name: test
         run: go test ./...
+
+  # Deliberately out of the gate. Fuzzing is neither fast nor deterministic, and a
+  # merge should not wait on it or be blocked by a run that happened to explore
+  # further than the last one.
+  fuzz:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [FuzzReader, FuzzRaw, FuzzTyped]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.1'
+
+      - name: fuzz ${{ matrix.target }}
+        run: go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=5m ./...
+
+      # A corpus entry that failed is the whole value of the run: without it the
+      # next run starts over and the finding is lost.
+      - name: upload the failing corpus
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: testdata/fuzz/
+          if-no-files-found: warn
+
+  # Out of the gate as well, but for a different reason than fuzzing: it needs a
+  # database, and a job that can be skipped for want of a service should not be
+  # what decides whether a merge is allowed.
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.1'
+
+      # A nested module with its own go.mod, so it is run from its own directory.
+      # The root module never learns that pgx exists.
+      - name: integration
+        working-directory: integration
+        env:
+          POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+        run: go test -v ./...

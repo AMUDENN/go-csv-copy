@@ -56,6 +56,15 @@ Columns is the column list to pass to pgx.CopyFrom, taken from the header.
 
 Empty when the file was empty - check it before creating a table, there is nothing
 to load.
+
+The names come out of the file, so they are untrusted input, and the staging-table
+pattern puts them on the path to CREATE TABLE. A column called
+
+	x" ); DROP TABLE clients; --
+
+is just a text file someone wrote. Quote every name that reaches a statement with
+pgx.Identifier{name}.Sanitize(), or reject the header up front with
+ValidateColumns. For CopyFrom itself, pgx quotes them.
 */
 func (s *Raw) Columns() []string {
 	return s.reader.Columns()

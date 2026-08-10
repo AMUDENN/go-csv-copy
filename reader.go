@@ -25,6 +25,7 @@ the file is. It does not close the underlying io.Reader.
 */
 type Reader struct {
 	cr       *csv.Reader
+	budget   *budgetReader
 	settings settings
 	columns  []string
 	record   []string
@@ -45,17 +46,35 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 
 	set := newSettings(opts)
 
-	if !validComma(set.comma) {
+	if !validDelim(set.comma) {
 		return nil, fmt.Errorf("%w: %q is not a usable delimiter", ErrSchema, set.comma)
+	}
+	if set.comment != 0 {
+		if !validDelim(set.comment) {
+			return nil, fmt.Errorf("%w: %q is not a usable comment rune", ErrSchema, set.comment)
+		}
+		if set.comment == set.comma {
+			return nil, fmt.Errorf("%w: the comment rune and the delimiter are both %q",
+				ErrSchema, set.comma)
+		}
 	}
 
 	body, err := skipBOM(r)
 	if err != nil {
-		return nil, fmt.Errorf("%w: read bom: %w", ErrParse, err)
+		// The stream failed before a byte of content existed to be malformed, so
+		// this is ErrIO and not a bad file.
+		return nil, fmt.Errorf("%w: read bom: %w", ErrIO, err)
+	}
+
+	var budget *budgetReader
+	if set.maxRecordBytes > 0 {
+		budget = &budgetReader{r: body, max: set.maxRecordBytes}
+		body = budget
 	}
 
 	cr := csv.NewReader(body)
 	cr.Comma = set.comma
+	cr.Comment = set.comment
 	cr.LazyQuotes = set.lazyQuotes
 	cr.TrimLeadingSpace = set.trimLeadingSpace
 	cr.ReuseRecord = true
@@ -66,20 +85,20 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 	reader := &Reader{settings: set}
 
 	for row := 1; row < set.headerRow; row++ {
-		if _, err = cr.Read(); err != nil {
+		if _, err = readRecord(cr, budget); err != nil {
 			if errors.Is(err, io.EOF) {
 				return reader, nil
 			}
-			return nil, parseError(row, err)
+			return nil, classify(row, err)
 		}
 	}
 
-	header, err := cr.Read()
+	header, err := readRecord(cr, budget)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			return reader, nil
 		}
-		return nil, parseError(set.headerRow, err)
+		return nil, classify(set.headerRow, err)
 	}
 
 	reader.columns = make([]string, len(header))
@@ -87,6 +106,7 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 		reader.columns[i] = set.normalizeHeader(name)
 	}
 	reader.cr = cr
+	reader.budget = budget
 	reader.line = recordLine(cr, header, set.headerRow)
 
 	if !set.variableColumns {
@@ -100,6 +120,11 @@ func NewReader(r io.Reader, opts ...Option) (*Reader, error) {
 Columns returns the header as it was read and normalized, or nil if the input was
 empty. The slice is shared, not copied - it is handed straight to pgx.CopyFrom,
 which does not modify it.
+
+These names come out of the file and are untrusted input. Normalizing collapses
+whitespace; it does not make a name safe to paste into a statement. Before one
+reaches DDL, quote it - pgx.Identifier{name}.Sanitize() - or put the header through
+ValidateColumns. For CopyFrom, pgx quotes them itself.
 */
 func (r *Reader) Columns() []string {
 	return r.columns
@@ -139,8 +164,10 @@ The first bad record ends the reader: the error is returned again by every later
 call and stays in Err. Rows are never skipped, so a caller cannot resume past a
 bad record and mistake a truncated file for a whole one.
 
-The returned slice is reused by the next call. Every error other than io.EOF wraps
-ErrParse and carries the line number.
+The returned slice is reused by the next call. Every error other than io.EOF
+carries the line number and wraps one of three sentinels: ErrRecordTooLarge if the
+record outgrew WithMaxRecordBytes, ErrParse if the content is malformed, or ErrIO
+if the stream underneath failed.
 */
 func (r *Reader) Read() ([]string, error) {
 	if r.err != nil {
@@ -150,7 +177,7 @@ func (r *Reader) Read() ([]string, error) {
 		return nil, io.EOF
 	}
 
-	record, err := r.cr.Read()
+	record, err := readRecord(r.cr, r.budget)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil, io.EOF
@@ -161,7 +188,7 @@ func (r *Reader) Read() ([]string, error) {
 		// this record did have, padded out with the last one's leftovers.
 		r.line = errorLine(r.line+1, err)
 		r.record = record
-		r.err = parseError(r.line, err)
+		r.err = classify(r.line, err)
 
 		return nil, r.err
 	}
@@ -220,21 +247,23 @@ func (r *Reader) wrap(err error) error {
 }
 
 /*
-validComma repeats the check encoding/csv makes when it reads its first record.
+validDelim repeats the check encoding/csv makes when it reads its first record. It
+governs both the field delimiter and the comment rune, which the standard library
+holds to the same rule.
 
-Done here so that an unusable delimiter is an ErrSchema from the constructor
-rather than an ErrParse on the first row: it is a bug in the calling code, no
-input file will ever fix it, and a caller that quarantines files on ErrParse must
-not act on it. Doing it up front also keeps an empty input from turning into an
-error, which the package promises it never is.
+Done here so that an unusable rune is an ErrSchema from the constructor rather than
+an ErrParse on the first row: it is a bug in the calling code, no input file will
+ever fix it, and a caller that quarantines files on ErrParse must not act on it.
+Doing it up front also keeps an empty input from turning into an error, which the
+package promises it never is.
 */
-func validComma(comma rune) bool {
-	switch comma {
+func validDelim(delim rune) bool {
+	switch delim {
 	case 0, '"', '\r', '\n', utf8.RuneError:
 		return false
 	}
 
-	return utf8.ValidRune(comma)
+	return utf8.ValidRune(delim)
 }
 
 /*
@@ -267,19 +296,47 @@ func errorLine(fallback int, err error) int {
 }
 
 /*
-parseError attributes err to a line.
+readRecord pulls one record, giving it a fresh byte budget first.
+
+Per record, not per file: a legitimate multi-line quoted field gets the whole
+budget of its own, and only a record that never ends runs out.
+*/
+func readRecord(cr *csv.Reader, budget *budgetReader) ([]string, error) {
+	if budget != nil {
+		budget.reset()
+	}
+
+	return cr.Read()
+}
+
+/*
+classify decides whose fault an error from encoding/csv is, and attributes it to a
+line.
+
+The rule rests on how encoding/csv reports: everything the parser itself objects to
+arrives as a *csv.ParseError, and anything else it hands back came from the
+underlying io.Reader unchanged. So the shape of the error is the evidence, and the
+three outcomes are the three sentinels.
+
+The order matters. The byte budget is enforced by a reader, which makes it look like
+an I/O failure, but a record too large to read is a property of the file - it goes
+to ErrRecordTooLarge, not ErrIO.
 
 A csv.ParseError already names the line in its own message, so repeating it here
-would print it twice - "line 12: record on line 12: ..." - for the error type
-that produces most of these.
+would print it twice - "line 12: record on line 12: ..." - for the error type that
+produces most of these.
 */
-func parseError(line int, err error) error {
+func classify(line int, err error) error {
+	if errors.Is(err, errRecordTooLarge) {
+		return fmt.Errorf("%w: line %d", ErrRecordTooLarge, line)
+	}
+
 	var parseErr *csv.ParseError
 	if errors.As(err, &parseErr) {
 		return fmt.Errorf("%w: %w", ErrParse, err)
 	}
 
-	return fmt.Errorf("%w: line %d: %w", ErrParse, line, err)
+	return fmt.Errorf("%w: line %d: %w", ErrIO, line, err)
 }
 
 /*

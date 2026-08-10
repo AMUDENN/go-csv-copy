@@ -49,6 +49,11 @@ linters:
         - .Err(
         # skipBOM hands the raw read error to NewReader, which wraps it once.
         - io.ReadFull(
+        # A read error has to travel unwrapped to the single place that classifies
+        # it. Wrapping it at the source would break the identity of io.EOF, which
+        # encoding/csv reads as "end of input", and would hide the sentinel a
+        # caller needs - a cancelled context, say - behind our own text.
+        - .Read(
 
   exclusions:
     rules:

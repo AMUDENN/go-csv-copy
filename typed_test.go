@@ -380,6 +380,70 @@ func TestTypedDuplicateTagAfterNormalization(t *testing.T) {
 	}
 }
 
+/*
+Truncated separates "the value was absent" from "the value was empty".
+
+A tagged field is a string and cannot hold nil, so both arrive as "" - and in
+Postgres a NULL and an empty string are different values. Without this the caller
+has no way to know which one it is looking at.
+*/
+func TestTypedTruncatedFlag(t *testing.T) {
+	src, err := NewTyped(
+		strings.NewReader("id;name\n1;Alice\n2;\n3\n"),
+		func(p *person) (person, error) { return *p, nil },
+		WithVariableColumns(true),
+	)
+	if err != nil {
+		t.Fatalf("NewTyped: %v", err)
+	}
+
+	want := []struct {
+		name      string
+		truncated bool
+	}{
+		{name: "Alice", truncated: false}, // both fields present
+		{name: "", truncated: false},      // name present and empty
+		{name: "", truncated: true},       // the record stopped before name
+	}
+
+	for i, expected := range want {
+		if !src.Next() {
+			t.Fatalf("row %d: Next() = false, Err() = %v", i+1, src.Err())
+		}
+		if got := src.Value().Name; got != expected.name {
+			t.Errorf("row %d: Name = %q, want %q", i+1, got, expected.name)
+		}
+		if got := src.Truncated(); got != expected.truncated {
+			t.Errorf("row %d: Truncated() = %v, want %v", i+1, got, expected.truncated)
+		}
+	}
+
+	if src.Next() {
+		t.Error("Next() = true after the last row")
+	}
+	if err = src.Err(); err != nil {
+		t.Errorf("Err() = %v, want nil", err)
+	}
+}
+
+// Without WithVariableColumns a short record is an error, so the flag can never be
+// true - the reader stops before Typed ever sees the record.
+func TestTypedTruncatedNeverTrueOnFixedWidth(t *testing.T) {
+	src, err := NewTyped(strings.NewReader("id;name\n1;Alice\n2\n"), toEntity)
+	if err != nil {
+		t.Fatalf("NewTyped: %v", err)
+	}
+
+	for src.Next() {
+		if src.Truncated() {
+			t.Error("Truncated() = true without WithVariableColumns")
+		}
+	}
+	if !errors.Is(src.Err(), ErrParse) {
+		t.Errorf("Err() = %v, want ErrParse for the short record", src.Err())
+	}
+}
+
 func TestTypedUnused(t *testing.T) {
 	src, err := NewTyped(strings.NewReader("id;name;renamed_away;spare\n"), toEntity)
 	if err != nil {

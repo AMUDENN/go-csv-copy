@@ -7,6 +7,7 @@ type Option func(*settings)
 
 type settings struct {
 	comma            rune
+	comment          rune
 	lazyQuotes       bool
 	trimLeadingSpace bool
 	trimValues       bool
@@ -16,17 +17,29 @@ type settings struct {
 	variableColumns  bool
 	allowMissing     bool
 	pointerValues    bool
+	maxRecordBytes   int64
 }
+
+/*
+defaultMaxRecordBytes bounds one record at 64 MiB.
+
+No honest row comes near it - a thousand columns of 64 KiB each would still fit -
+and an unclosed quote runs into it immediately. Sized to be invisible in normal
+use and to catch the one input that is not normal.
+*/
+const defaultMaxRecordBytes = 64 << 20
 
 func newSettings(opts []Option) settings {
 	set := settings{
 		comma:            ';',
-		lazyQuotes:       true,
+		lazyQuotes:       false,
 		trimLeadingSpace: true,
 		trimValues:       true,
 		headerRow:        1,
 		normalizeHeader:  NormalizeSpace,
 		tag:              "csv",
+		pointerValues:    true,
+		maxRecordBytes:   defaultMaxRecordBytes,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -64,8 +77,36 @@ func WithComma(comma rune) Option {
 	return func(s *settings) { s.comma = comma }
 }
 
-// WithLazyQuotes allows a bare quote inside an unquoted field instead of
-// failing the record. Defaults to true.
+/*
+WithComment sets a rune that starts a comment line. Zero, the default, means the
+file has no comments.
+
+A line whose first rune is this one is skipped entirely, wherever it appears -
+which is what WithHeaderRow cannot do, since that only drops a fixed number of
+lines at the top.
+
+Validated like the delimiter, and for the same reason: a comment rune equal to the
+delimiter, or one encoding/csv will not accept, is ErrSchema from the constructor
+rather than ErrParse on the first row. Skipped lines do not shift the line numbers
+in errors - those come from encoding/csv, which counts the physical file.
+*/
+func WithComment(comment rune) Option {
+	return func(s *settings) { s.comment = comment }
+}
+
+/*
+WithLazyQuotes tolerates quoting encoding/csv would otherwise reject: a bare quote
+inside an unquoted field, and a quoted field that never closes. Defaults to false.
+
+Turning it on trades a precise error for silent damage. `1;"2"3;4` becomes the
+field `2"3` with the right number of fields, so nothing objects. An unclosed quote
+is worse: the parser reads to EOF looking for the closing one and the entire rest
+of the file arrives as a single value. What surfaces then is a field-count error
+naming the line the file ended on rather than the line the quote opened on - and
+with WithVariableColumns there is no error at all.
+
+Off, the same input is a parse error naming the line and the column of the quote.
+*/
 func WithLazyQuotes(lazy bool) Option {
 	return func(s *settings) { s.lazyQuotes = lazy }
 }
@@ -98,8 +139,20 @@ func WithHeaderRow(row uint) Option {
 	return func(s *settings) { s.headerRow = int(min(row, headerRowLimit)) }
 }
 
-// WithNormalizeHeader replaces the header normalizer. Passing nil restores
-// identity. Defaults to NormalizeSpace.
+/*
+WithNormalizeHeader replaces the header normalizer. Passing nil restores identity.
+Defaults to NormalizeSpace.
+
+It runs on both sides of the match: on every column name read from the file, and on
+every csv tag value read from a struct. That is what keeps a normalizer like
+strings.ToLower working - lowering only the file's names would stop them matching
+tags written in any other case.
+
+So it has to be pure and idempotent. It is called once per column and once per
+tagged field when a plan is built, never on the row path, and a function that
+returns different answers for the same input turns column matching into a
+coin toss.
+*/
 func WithNormalizeHeader(fn func(string) string) Option {
 	return func(s *settings) { s.normalizeHeader = fn }
 }
@@ -118,7 +171,13 @@ func WithTag(tag string) Option {
 
 /*
 WithVariableColumns accepts rows whose field count differs from the header's.
-Missing trailing values become NULL and extra ones are dropped.
+Extra values are dropped; missing trailing ones become NULL in Raw and "" in Typed.
+
+That difference is real, not a wording slip. Raw hands pgx an []any and can put nil
+there, which is SQL NULL. A tagged field in Typed is declared string, so there is no
+nil to assign and an absent value is indistinguishable from an empty one - and in
+Postgres a NULL and an empty string are different values. Typed.Truncated reports
+which case the current row is, since convert cannot see it.
 
 Off by default: a row that is the wrong width usually means the delimiter or the
 quoting is misread, and failing beats loading shifted data.
@@ -139,22 +198,48 @@ func WithAllowMissingColumns(allow bool) Option {
 }
 
 /*
-WithPointerValues makes Raw hand out *string instead of string, which removes one
-allocation per column per row.
+WithPointerValues controls whether Raw hands out *string or string. Defaults to
+true, which is *string.
 
 Putting a string into an []any boxes it, and boxing a string always allocates 16
-bytes for its header - so the default costs one allocation per cell, which on a
-wide file dwarfs everything else. A pointer is pointer-shaped: the interface holds
-it directly and boxing is free. The strings live in one array allocated per file,
-and a value the row stopped short of is a nil interface, still NULL.
+bytes for its header, so plain strings cost one allocation per cell. A pointer is
+pointer-shaped: the interface holds it directly and boxing is free. The strings live
+in one array allocated per file, and a value the row stopped short of is a nil
+interface, still NULL. On five columns that is 6 allocations per row against 1; on
+thirty it is 31 against 1.
 
-Off by default on purpose. pgx dereferences *T through its pointer encode plan and
-*string is the ordinary way to pass a nullable text value, so this should be
-transparent - but "should" is not "measured against a real database". Turn it on,
-load a real file, compare the result, then make it the default.
+The default is *string because pgx cannot tell the difference, and that is a
+measured result rather than an argument: the integration tests load the same file
+both ways into an all-TEXT table and compare an md5 of the rows, and load both ways
+into a table of bigint, numeric and date. Both pass.
 
-Affects Raw only. In Copy the boxing happens inside your own encode func.
+Pass false if you drive the source yourself and want plain strings - a type switch
+over []any is easier to write against string than *string. Nothing else in the
+package is affected: Typed decodes into your struct fields, and in Copy the boxing
+happens inside your own encode.
 */
 func WithPointerValues(pointers bool) Option {
 	return func(s *settings) { s.pointerValues = pointers }
+}
+
+/*
+WithMaxRecordBytes caps how large one record may be. Zero, or anything negative,
+removes the cap. Defaults to 64 MiB.
+
+The cap is what makes "memory does not depend on the size of the file" true for
+input nobody checked. encoding/csv assembles a record in one buffer and has no
+limit of its own, so a field that opens a quote and never closes it is read to the
+end of the file and the whole file becomes one value. Exceeding the cap is
+ErrRecordTooLarge.
+
+The bound is approximate: csv.Reader buffers ahead, so the accounting is off by up
+to one buffer. It is an upper bound on memory, not a byte count to assert against.
+*/
+func WithMaxRecordBytes(n int64) Option {
+	return func(s *settings) {
+		if n < 0 {
+			n = 0
+		}
+		s.maxRecordBytes = n
+	}
 }

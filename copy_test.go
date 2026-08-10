@@ -136,6 +136,56 @@ func TestCopyNilArguments(t *testing.T) {
 	})
 }
 
+/*
+Line and Record reach through to the source.
+
+The advice for a failed CopyFrom is to read the source's error first, because that
+is the one that names the line. That advice only works if the object you have can
+be asked, and the obvious code hands the Typed straight to NewCopy and keeps no
+other reference to it.
+*/
+func TestCopyForwardsLineAndRecord(t *testing.T) {
+	rows, err := NewTyped(strings.NewReader("id;name\n1;Alice\n2;Bob\n"), toEntity)
+	if err != nil {
+		t.Fatalf("NewTyped: %v", err)
+	}
+
+	source := newCopy(t, rows, 2, func(dst []any, e *entity) []any {
+		return append(dst, e.ID, e.Name)
+	})
+
+	if !source.Next() {
+		t.Fatalf("Next() = false, Err() = %v", source.Err())
+	}
+	if got, want := source.Line(), rows.Line(); got != want {
+		t.Errorf("Line() = %d, want %d - the same line Typed reports", got, want)
+	}
+	if got, want := source.Line(), 2; got != want {
+		t.Errorf("Line() = %d, want %d", got, want)
+	}
+	if got, want := source.Record(), []string{"1", "Alice"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Record() = %q, want %q", got, want)
+	}
+}
+
+// A source with no lines answers zero and nil rather than forcing every source to
+// declare methods it cannot implement.
+func TestCopyLineAndRecordWithoutAWillingSource(t *testing.T) {
+	source := newCopy(t, &slice[int]{items: []int{1}}, 1, func(dst []any, i int) []any {
+		return append(dst, i)
+	})
+
+	if !source.Next() {
+		t.Fatal("Next() = false, want a row")
+	}
+	if got := source.Line(); got != 0 {
+		t.Errorf("Line() = %d, want 0", got)
+	}
+	if got := source.Record(); got != nil {
+		t.Errorf("Record() = %q, want nil", got)
+	}
+}
+
 // The whole point of the layering: Typed decodes, Copy lays out, and neither knows
 // about the other's concerns.
 func TestCopyOverTyped(t *testing.T) {

@@ -27,6 +27,34 @@ callers who accept that risk.
 var ErrMissingColumns = fmt.Errorf("%w: header is missing columns", ErrParse)
 
 /*
+ErrIO is wrapped by every error the input stream causes rather than the file's
+content: a connection dropped mid-read, a cancelled context, a disk that failed.
+The cause is left in the chain, so errors.Is(err, context.Canceled) still answers.
+
+It deliberately does not wrap ErrParse. A caller that quarantines a file on
+ErrParse must not quarantine a good file because the network blinked - the file is
+fine, the read is not, and the right response is to try again rather than to give
+up on the input.
+*/
+var ErrIO = errors.New("csv read")
+
+/*
+errRecordTooLarge is the raw signal budgetReader hands to encoding/csv. It travels
+through the parser and is turned into ErrRecordTooLarge, with a line, by the
+reader.
+*/
+var errRecordTooLarge = errors.New("record exceeds the byte limit")
+
+/*
+ErrRecordTooLarge reports a single record longer than WithMaxRecordBytes allows.
+
+Almost always an unclosed quote: encoding/csv then reads to the end of the file
+looking for the closing one, and the whole file becomes a single field. The limit
+is what keeps memory bounded on input the caller did not write.
+*/
+var ErrRecordTooLarge = fmt.Errorf("%w: %w", ErrParse, errRecordTooLarge)
+
+/*
 ErrSchema reports wiring that cannot work whatever the file holds: a struct that
 cannot be decoded into at all - not a struct, a tagged field that is not a string
 or not exported, two fields asking for one column, a tag inside an embedded struct

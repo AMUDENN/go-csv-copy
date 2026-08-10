@@ -1,0 +1,27 @@
+version: 2
+
+updates:
+  # The actions are pinned to commit SHAs, which is what keeps a step's contents
+  # from changing without a commit here. The cost is that a pin never moves on its
+  # own, including for a security fix - so something has to move it, and this is
+  # that something. Dependabot rewrites the SHA and the trailing version comment
+  # together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: 'ci:'
+
+  # There are no module dependencies to update, and that is an invariant rather
+  # than an accident - CI fails if go.mod gains a require. This entry is here for
+  # the nested integration module, which does have dependencies, and to notice the
+  # go directive falling far behind.
+  - package-ecosystem: gomod
+    directories:
+      - /
+      - /integration
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: 'deps:'

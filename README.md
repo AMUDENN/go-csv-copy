@@ -74,13 +74,20 @@ if len(columns) == 0 {
     return nil // an empty file is not an error
 }
 
+// The names came out of the file. This one builds DDL from them, so they are
+// untrusted input: a column called `x" ); DROP TABLE clients; --` is just a text
+// file someone wrote. Quote them, or refuse the header outright.
+if err := csvcopy.ValidateColumns(columns); err != nil {
+    return err
+}
+
 if err := createStagingTable(ctx, tx, table, columns); err != nil {
     return err
 }
 
 n, err := tx.CopyFrom(ctx, pgx.Identifier{table}, columns, src)
 if srcErr := src.Err(); srcErr != nil {
-    return fmt.Errorf("parse input: %w", srcErr)
+    return fmt.Errorf("read input at line %d: %w", src.Line(), srcErr)
 }
 if err != nil {
     return fmt.Errorf("copy from: %w", err)
@@ -120,10 +127,10 @@ if err != nil {
 }
 
 _, err = tx.CopyFrom(ctx, pgx.Identifier{"clients_tmp"}, clientColumns, source)
+if srcErr := source.Err(); srcErr != nil {
+    return fmt.Errorf("read input at line %d: %w", source.Line(), srcErr)
+}
 if err != nil {
-    if srcErr := source.Err(); srcErr != nil {
-        err = srcErr
-    }
     return fmt.Errorf("copy from: %w", err)
 }
 
@@ -207,15 +214,17 @@ type RowSource[T any] interface {
 | Option | Default | Effect |
 |---|---|---|
 | `WithComma(r rune)` | `';'` | field delimiter |
-| `WithLazyQuotes(bool)` | `true` | tolerate a bare quote inside a field instead of failing |
+| `WithLazyQuotes(bool)` | `false` | tolerate a bare quote, and a quoted field that never closes, instead of failing |
 | `WithTrimLeadingSpace(bool)` | `true` | drop white space at the start of a field |
 | `WithTrimValues(bool)` | `true` | `TrimSpace` every value |
 | `WithHeaderRow(n uint)` | `1` | which row holds the header; rows above it are dropped |
-| `WithNormalizeHeader(fn)` | collapse whitespace | normalize a column name before matching |
+| `WithNormalizeHeader(fn)` | collapse whitespace | normalize a name before matching — applied to **both** the file's column names and the `csv` tag values, so it must be pure and idempotent |
 | `WithTag(string)` | `"csv"` | which struct tag `Typed` reads column names from |
-| `WithVariableColumns(bool)` | `false` | accept rows of a different width: missing trailing values → `nil`, extra ones dropped |
+| `WithVariableColumns(bool)` | `false` | accept rows of a different width: extra values dropped, missing trailing ones → `nil` in `Raw`, `""` in `Typed` |
 | `WithAllowMissingColumns(bool)` | `false` | do not fail when a tagged column is absent from the header |
-| `WithPointerValues(bool)` | `false` | `Raw` yields `*string` instead of `string`, removing one allocation per cell |
+| `WithPointerValues(bool)` | `true` | `Raw` yields `*string`, which costs no allocation per cell. `false` gives plain `string` |
+| `WithMaxRecordBytes(int64)` | `64 MiB` | cap on one record; zero removes it. Exceeding it is `ErrRecordTooLarge` |
+| `WithComment(rune)` | `0` (off) | a rune that starts a comment line, skipped wherever it appears |
 
 ### The `csv` tag
 
@@ -240,6 +249,17 @@ field would read as empty on every row, and the column it named would reach the 
 the same damage `ErrMissingColumns` exists to prevent, only without the error. List the columns on
 the struct itself.
 
+#### Why `;` and not `,`
+
+`encoding/csv` defaults to `,`, so this looks like gratuitous disagreement. It follows the target
+case. These files come out of spreadsheet exports on machines whose locale uses `,` as the decimal
+separator, where Excel and LibreOffice write `;` — and where a comma-delimited file with a single
+`1,5` in it is silently one column wider than its header. Anything reading such files hits `;`
+overwhelmingly more often than `,`.
+
+Pass `WithComma(',')` for RFC 4180 files. The default is one option away either direction; what it
+should not be is a surprise, hence this paragraph.
+
 ### Diagnostics
 
 | Method | Gives |
@@ -252,9 +272,41 @@ the struct itself.
 | `Line()` | the 1-based **physical** line of the file the current row starts on |
 | `Rows()` | how many rows have been handed out |
 
+`Copy` forwards `Line()` and `Record()` to whatever it wraps, so a source can go straight into
+`NewCopy` without keeping a second reference to it just to ask where a failure came from. A source
+with no lines — over an API, or a generator — answers `0` and `nil`.
+
+### `nil` in `Raw`, `""` in `Typed`
+
+Under `WithVariableColumns`, a value the record never reached becomes SQL `NULL` in `Raw` and the
+empty string in `Typed`. The asymmetry is forced, not chosen: `Raw` hands pgx an `[]any` and can put
+`nil` in it, while a tagged field is declared `string` and has no `nil` to hold. In Postgres `NULL`
+and `''` are different values, so the difference matters.
+
+`Typed.Truncated()` tells the two cases apart, read after `Next()`:
+
+```go
+for source.Next() {
+    if source.Truncated() {
+        log.Warn("short record", "line", source.Line())
+    }
+}
+```
+
+`convert` cannot see it — it is called inside `Next()` with the struct as its only argument, and
+widening that signature would change every caller's code. Reject a short row in the loop instead.
+
 `Unused()` is worth logging as a warning: when an export renames a column, the tag simply matches
 nothing, no error is raised, and the wrong data reaches the database. The unbound column is the only
 visible trace.
+
+⚠️ **`Columns()` returns untrusted input.** The names come out of the file, and the staging-table
+pattern puts them on the path to `CREATE TABLE` — a column called `x" ); DROP TABLE clients; --` is
+just a text file someone wrote. Quote every name that reaches a statement with
+`pgx.Identifier{name}.Sanitize()`, or refuse the header up front with
+`csvcopy.ValidateColumns(columns)`, which rejects empty names, duplicates, names over 63 bytes
+(Postgres truncates at `NAMEDATALEN` and two columns then collide) and anything outside
+`[A-Za-z0-9_]`, listing every violation at once. `CopyFrom` itself quotes them.
 
 ⚠️ `WithAllowMissingColumns(true)` is dangerous. The absent field reads as the empty string on every
 row and reaches the database as `NULL`, quietly wiping whatever that column held. Only use it where
@@ -266,9 +318,23 @@ Errors are split by who can fix them.
 
 | Sentinel | Wraps `ErrParse` | Cause |
 |---|---|---|
-| `ErrParse` | — | a malformed record, a failing `convert`, a read failure |
+| `ErrParse` | — | the file's content is wrong: a malformed record, a failing `convert` |
 | `ErrMissingColumns` | yes | the header lacks a column a tag asks for |
+| `ErrInvalidColumns` | yes | `ValidateColumns` refused a header name |
+| `ErrRecordTooLarge` | yes | one record outgrew `WithMaxRecordBytes` |
+| `ErrIO` | **no** | the stream failed, not the file: a dropped connection, a cancelled context, a bad disk |
 | `ErrSchema` | **no** | a bug in the calling code: not a struct, a tag on a non-string or unexported field, a tag inside an embedded struct, two fields asking for one column, a nil reader/convert/src/encode, an unusable delimiter |
+
+The split exists because the three answers differ: `ErrSchema` means **fix the code**, `ErrIO`
+means **retry**, `ErrParse` means **the file is bad** — quarantine it. Getting this wrong is not
+theoretical. Until `ErrIO` existed, a dropped TCP connection was reported as `ErrParse`, so anyone
+following the advice above would quarantine a perfectly good file forever because the network
+blinked once.
+
+The classification is not guesswork: `encoding/csv` reports everything the parser objects to as a
+`*csv.ParseError` and passes anything else back from the underlying reader unchanged, so the shape
+of the error is the evidence. The original cause stays in the chain either way, so
+`errors.Is(err, context.Canceled)` still answers.
 
 Everything a file can cause wraps `ErrParse` and carries the line number:
 
@@ -306,9 +372,13 @@ run — including a run on an empty file.
   Breaking out of a loop is different: that is not an error, and the next pull carries on.
 - **`Record()` names the row that failed**, as far as `encoding/csv` got with it. `Line()` names the
   physical line it starts on.
-- **Memory is constant** and independent of the row count. `Values()` reuses one slice, which is
-  safe under `pgx.CopyFrom` because it encodes a row before asking for the next. If you drive a
-  source by hand, do not retain the result of `Values()` between iterations.
+- **Memory is constant** and independent of the row count — bounded by the largest single record,
+  and that bound is `WithMaxRecordBytes` (64 MiB by default). `encoding/csv` assembles a record in
+  one buffer and has no limit of its own, so a field that opens a quote and never closes it is read
+  to the end of the file and the whole file becomes one value; the cap is what makes the guarantee
+  hold on input nobody checked. `Values()` reuses one slice, which is safe under `pgx.CopyFrom`
+  because it encodes a row before asking for the next. If you drive a source by hand, do not retain
+  the result of `Values()` between iterations.
 - **Not safe for concurrent use.** One source, one goroutine — the same as `pgx.CopyFrom`.
 - `Reader`, `Raw` and `Typed` do not close the `io.Reader` you give them.
 
@@ -321,11 +391,11 @@ where from. 100k rows of 5 columns, go1.26.1, Ryzen 5 7500F:
 
 | | ns/op | B/op | allocs/op | per row |
 |---|---|---|---|---|
-| `Typed` | 13.6 ms | 3.2 MB | 100 038 | 1 |
-| `Typed` via `All()` | 14.4 ms | 3.2 MB | 100 038 | 1 |
-| `Raw` | 18.7 ms | 11.2 MB | 600 033 | 6 |
-| `Raw` via `All()` | 20.6 ms | 11.2 MB | 600 032 | 6 |
-| `Raw` + `WithPointerValues` | 11.2 ms | 3.2 MB | 100 033 | 1 |
+| `Raw` | 12.6 ms | 3.2 MB | 100 034 | 1 |
+| `Raw` via `All()` | 12.5 ms | 3.2 MB | 100 034 | 1 |
+| `Typed` | 14.6 ms | 3.2 MB | 100 039 | 1 |
+| `Typed` via `All()` | 15.0 ms | 3.2 MB | 100 039 | 1 |
+| `Raw` + `WithPointerValues(false)` | 22.1 ms | 11.2 MB | 600 033 | 6 |
 
 Ranging costs nothing: an `iter.Seq` returned from a method closes over the source once per pass,
 not once per row, so `All()` sits on the same allocation count as the `Next()` loop it replaces.
@@ -333,17 +403,51 @@ not once per row, so `All()` sits on the same allocation count as the `Next()` l
 The one allocation per row is `encoding/csv`: it creates one string per record even with
 `ReuseRecord`, and that is the floor short of `unsafe`.
 
-The other five are the columns. Boxing a `string` into an `any` **always** allocates 16 bytes for
-its header, so `Raw` pays one allocation per cell by default — that is the shape of
-`Values() ([]any, error)`. `WithPointerValues(true)` yields `*string` out of an array allocated once
-per file: a pointer is pointer-shaped, the interface holds it directly, and boxing is free. On a
-30-column file the difference is thirtyfold.
+The extra five in the last row are the columns. Boxing a `string` into an `any` **always** allocates
+16 bytes for its header, so plain strings cost one allocation per cell — that is the shape of
+`Values() ([]any, error)`. A `*string` out of an array allocated once per file is pointer-shaped: the
+interface holds it directly and boxing is free.
 
-The option is off by default: pgx dereferences `*T` through its pointer encode plan and `*string` is
-the ordinary way to pass a nullable text value, but this has not been verified against a real
-Postgres. Turn it on deliberately and check the loaded result.
+That is why `*string` is the default, and pgx cannot tell the difference — measured, not argued. The
+integration tests load the same file both ways into an all-TEXT table and compare an `md5` of the
+rows, then load both ways into a table of `bigint`, `numeric` and `date`. Both agree.
 
-In `Copy` the boxing happens inside your own `encode`, so the option does not affect it.
+Pass `WithPointerValues(false)` if you drive the source yourself and would rather type-switch over
+`string` than `*string`.
+
+### It matters more the wider the file
+
+20k rows of 30 columns:
+
+| | ns/op | B/op | allocs/op | per row |
+|---|---|---|---|---|
+| `Raw` | 13.2 ms | 5.3 MB | 20 066 | 1 |
+| `Typed` | 15.7 ms | 5.3 MB | 20 099 | 1 |
+| `Raw` + `WithPointerValues(false)` | 21.8 ms | 14.9 MB | 620 065 | **31** |
+
+Six times the columns, thirty-one times the allocations once the values are strings. The default and
+`Typed` both stay flat at one per row — `apply` is linear in the number of bound fields but writes
+into a struct and allocates nothing. What the default saves grows with the width of the file: 31×
+here against 6× on five columns.
+
+### The `encode` mistake that undoes it
+
+In `Copy` the boxing happens inside your own `encode`, so `WithPointerValues` does not affect it.
+What does affect it is whether `encode` appends into `dst` or returns a fresh slice. The second
+reads perfectly naturally and nothing stops you writing it:
+
+```go
+// Correct: appends into the buffer Copy keeps.
+func(dst []any, c *Client) []any { return append(dst, c.ID, c.Email) }
+
+// Costs one allocation per row, forever.
+func(_ []any, c *Client) []any { return []any{c.ID, c.Email} }
+```
+
+| | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| appending into `dst` | 23.5 ms | 11.2 MB | 600 042 |
+| returning a new slice | 26.4 ms | 19.2 MB | 700 043 |
 
 ⸻
 

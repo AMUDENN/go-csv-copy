@@ -27,12 +27,13 @@ type Typed[S any, D any] struct {
 	unused  []string
 	convert func(*S) (D, error)
 
-	row     S
-	rowVal  reflect.Value
-	current D
-	rows    int64
-	err     error
-	done    bool
+	row       S
+	rowVal    reflect.Value
+	current   D
+	rows      int64
+	err       error
+	done      bool
+	truncated bool
 }
 
 /*
@@ -97,7 +98,7 @@ func (s *Typed[S, D]) Next() bool {
 		return false
 	}
 
-	s.plan.apply(record, s.rowVal)
+	s.truncated = s.plan.apply(record, s.rowVal)
 
 	value, err := s.convert(&s.row)
 	if err != nil {
@@ -152,6 +153,32 @@ func (s *Typed[S, D]) All() iter.Seq[D] {
 			}
 		}
 	}
+}
+
+/*
+Truncated reports whether the record behind the current row ran out before a bound
+column, so that field holds "" because the value was absent rather than empty.
+
+Only meaningful after Next returned true, and only ever true under
+WithVariableColumns - without it a short record is an error instead.
+
+It exists because the distinction is invisible where it matters most. Raw can put
+nil in an []any and get SQL NULL; a tagged field is declared string, so an absent
+value and an empty one both arrive as "", and in Postgres a NULL and an empty string
+are different values. Read it after Next if that difference matters:
+
+	for source.Next() {
+		if source.Truncated() {
+			log.Warn("short record", "line", source.Line())
+		}
+	}
+
+convert cannot see this. It is called inside Next, with the struct as its only
+argument, and adding a second one would change the signature every caller writes.
+If a row needs to be rejected for being short, reject it here.
+*/
+func (s *Typed[S, D]) Truncated() bool {
+	return s.truncated
 }
 
 // Header returns the header as read and normalized, or nil if the file was empty.
