@@ -14,9 +14,10 @@ CSV reader, and Typed decodes into your own types. Both have All for ranging.
 
 Two ways to fix the shape of a file, because both turn up in practice.
 
-Raw takes the shape from the file's own header - whatever columns arrived, in
-their order, all as text. This is the staging table case, where a SQL script types
-the data afterwards:
+Raw takes the shape from the file's own header - whatever columns arrived, in their
+order, all as text. This is the staging table case, where a SQL script types the data
+afterwards. Values come out as *string, which pgx dereferences and which costs no
+allocation to box; WithPointerValues(false) gives plain string instead:
 
 	src, err := csvcopy.NewRaw(file)
 	if err != nil {
