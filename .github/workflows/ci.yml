@@ -48,8 +48,22 @@ jobs:
       - name: test
         run: go test -race -coverprofile=coverage.out ./...
 
+      # A floor, not a target. It is here so that a change which adds an untested
+      # branch has to say so out loud; chasing the number for its own sake is how
+      # tests stop meaning anything. Currently 100%, so the floor sits just below.
       - name: coverage
-        run: go tool cover -func=coverage.out | tail -1
+        env:
+          COVERAGE_FLOOR: '99'
+        run: |
+          go tool cover -func=coverage.out | tail -1
+          total=$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}' | tr -d '%')
+          echo "coverage ${total}%, floor ${COVERAGE_FLOOR}%"
+          awk -v total="$total" -v floor="$COVERAGE_FLOOR" 'BEGIN {
+            if (total + 0 < floor + 0) {
+              printf "coverage %s%% is below the %s%% floor\n", total, floor
+              exit 1
+            }
+          }'
 
       # Not a performance gate, just proof the benchmarks still compile and run.
       - name: bench
